@@ -38,14 +38,13 @@ public class SailingScript extends Script {
                     trialsFeature.run(config);
                 }
 
-
             } catch (Exception ex) {
                 log.trace("Exception in main loop: ", ex);
             }
         }, 0, 100, TimeUnit.MILLISECONDS);
         return true;
     }
-    
+
     @Override
     public void shutdown() {
         super.shutdown();
