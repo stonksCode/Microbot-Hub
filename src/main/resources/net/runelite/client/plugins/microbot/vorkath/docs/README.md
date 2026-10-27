@@ -16,6 +16,7 @@ The **Vorkath Plugin** provides an automated way to fight Vorkath.
 | **POH in Rellekka**          | Teleport to POH in Rellekka and exit via portal                       |
 | **Rejuvenation Pool**        | Use POH rejuvenation Pool to restore stats                            |
 | **Rigour**                   | Activate Rigour? (Make sure you have it unlocked and have 74 prayer!) |
+| **Use Slayer's staff**       | Kill the Zombified Spawn by switching to a Slayer's staff (Crumble Undead autocast preset) instead of casting from the spellbook |
 
 ---
 
@@ -31,6 +32,26 @@ The **Vorkath Plugin** provides an automated way to fight Vorkath.
 2. Make sure to start at a bank.
 3. Activate the plugin.
 4. Enjoy! :)
+
+### Slayer's staff
+When **Use Slayer's staff** is enabled, the player must keep a Slayer's staff in the inventory setup with
+**Crumble Undead already set as its autocast**. Before each fight the plugin verifies the staff is available;
+when the Zombified Spawn appears it swaps to the staff and attacks the spawn (autocasting Crumble Undead),
+then swaps back to the primary weapon. When disabled, the plugin casts Crumble Undead from the spellbook and
+verifies you have the level, spellbook and runes before the fight.
+
+### Potions
+Before the fight the plugin drinks only a ranging potion and an extended super antifire. Anti-venom is **not**
+drunk pre-emptively; it is used on demand mid-fight the moment Vorkath's venom hitsplat lands, so a single dose
+lasts the whole kill.
+
+### Bolts
+The fight starts and continues on your primary bolts (e.g. ruby bolts (e)) and automatically switches to
+diamond bolts (e) once Vorkath drops below 30% health, then back to the primary bolts above 30%.
+
+### Debug
+Enable **Verbose logging** under the Debug section to print state transitions and special-attack handling
+(poke, red ball sidestep, acid woox-walk steps, venom cure, bolt swaps) to the Microbot log.
 
 ---
 

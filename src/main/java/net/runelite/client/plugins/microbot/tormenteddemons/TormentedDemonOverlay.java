@@ -1,6 +1,7 @@
 package net.runelite.client.plugins.microbot.tormenteddemons;
 
 
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.TitleComponent;
@@ -8,6 +9,7 @@ import net.runelite.client.ui.overlay.components.TitleComponent;
 import javax.inject.Inject;
 import java.awt.*;
 
+@Slf4j
 public class TormentedDemonOverlay extends OverlayPanel {
 
     @Inject
@@ -35,8 +37,8 @@ public class TormentedDemonOverlay extends OverlayPanel {
                     .color(Color.YELLOW)
                     .build());
 
-        } catch(Exception ex) {
-            System.out.println(ex.getMessage());
+        } catch (Exception ex) {
+            log.debug("Unable to render Tormented Demon overlay", ex);
         }
         return super.render(graphics);
     }

@@ -1,8 +1,6 @@
 package net.runelite.client.plugins.microbot.gauntlethelper;
 
 import net.runelite.client.plugins.microbot.Microbot;
-import net.runelite.client.plugins.microbot.gauntlethelper.GauntletHelperConfig;
-import net.runelite.client.plugins.microbot.gauntlethelper.GauntletHelperPlugin;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;

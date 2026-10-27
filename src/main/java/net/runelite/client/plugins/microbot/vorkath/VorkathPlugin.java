@@ -3,14 +3,14 @@ package net.runelite.client.plugins.microbot.vorkath;
 import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
-import net.runelite.api.Client;
-import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.HitsplatID;
 import net.runelite.api.events.ChatMessage;
-import net.runelite.api.events.ProjectileMoved;
+import net.runelite.api.events.HitsplatApplied;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.PluginConstants;
 import net.runelite.client.ui.overlay.OverlayManager;
 
@@ -32,10 +32,8 @@ import java.awt.*;
 @Slf4j
 public class VorkathPlugin extends Plugin {
 
-    public static final String version = "1.3.14";
+    public static final String version = "1.5.8";
 
-    @Inject
-    Client client;
     @Inject
     private VorkathConfig config;
     @Provides
@@ -65,17 +63,17 @@ public class VorkathPlugin extends Plugin {
     }
 
     @Subscribe
-    public void onProjectileMoved(ProjectileMoved e)
-    {
-        if (e.getProjectile().getId() == vorkathScript.getAcidProjectileId()) {
-            vorkathScript.getAcidPools().add(WorldPoint.fromLocal(client, e.getPosition()));
+    public void onChatMessage(ChatMessage event) {
+        if (event.getType() == ChatMessageType.GAMEMESSAGE && event.getMessage().equalsIgnoreCase("oh dear, you are dead!")) {
+            vorkathScript.state = State.DEAD_WALK;
         }
     }
 
     @Subscribe
-    public void onChatMessage(ChatMessage event) {
-        if (event.getType() == ChatMessageType.GAMEMESSAGE && event.getMessage().equalsIgnoreCase("oh dear, you are dead!")) {
-            vorkathScript.state = State.DEAD_WALK;
+    public void onHitsplatApplied(HitsplatApplied event) {
+        if (event.getHitsplat().getHitsplatType() == HitsplatID.VENOM
+                && event.getActor() == Microbot.getClient().getLocalPlayer()) {
+            vorkathScript.onVenomApplied();
         }
     }
 }

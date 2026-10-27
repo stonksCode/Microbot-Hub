@@ -48,6 +48,60 @@ public interface VorkathConfig extends Config {
     )
     String prayerSection = "Prayers";
 
+    @ConfigSection(
+            name = "Zombified Spawn",
+            description = "How the Zombified Spawn is killed during the freeze special",
+            position = 7
+    )
+    String spawnSection = "Zombified Spawn";
+
+    @ConfigSection(
+            name = "Debug",
+            description = "Troubleshooting options",
+            position = 8
+    )
+    String debugSection = "Debug";
+
+    @ConfigSection(
+            name = "Combat",
+            description = "Combat and healing options",
+            position = 9
+    )
+    String combatSection = "Combat";
+
+    @ConfigItem(
+            keyName = "HealThreshold",
+            name = "Heal at HP %",
+            description = "Eat food when hitpoints fall to or below this percentage. Lower values conserve food at the cost of a smaller safety margin.",
+            position = 0,
+            section = combatSection
+    )
+    default int healThreshold() {
+        return 75;
+    }
+
+    @ConfigItem(
+            keyName = "EatFoodForSpace",
+            name = "Eat food for loot space",
+            description = "Eat food (even at full health) to free inventory slots while looting when the inventory is full.",
+            position = 1,
+            section = combatSection
+    )
+    default boolean eatFoodForSpace() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "FoodToKeep",
+            name = "Food to keep",
+            description = "Maximum food to carry into a fight; any excess is eaten to free space. Set to 0 to keep all food.",
+            position = 2,
+            section = combatSection
+    )
+    default int foodToKeep() {
+        return 0;
+    }
+
     @ConfigItem(
             keyName = "Teleport",
             name = "Teleport",
@@ -137,6 +191,29 @@ public interface VorkathConfig extends Config {
             section = prayerSection
     )
     default boolean activateRigour() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "UseSlayerStaff",
+            name = "Use Slayer's staff",
+            description = "Equip a Slayer's staff (with Crumble Undead already set as its autocast) to kill the Zombified Spawn, instead of casting from the spellbook. " +
+                    "Keep the staff in your inventory setup. Enabling this skips the spellbook tab switching, which is more reliable during the freeze.",
+            position = 0,
+            section = spawnSection
+    )
+    default boolean useSlayerStaff() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "VerboseLogging",
+            name = "Verbose logging",
+            description = "Log state transitions and special-attack handling to the Microbot log for troubleshooting",
+            position = 0,
+            section = debugSection
+    )
+    default boolean verboseLogging() {
         return false;
     }
 }
