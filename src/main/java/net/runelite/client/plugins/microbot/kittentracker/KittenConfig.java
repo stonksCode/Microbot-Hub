@@ -86,6 +86,56 @@ public interface KittenConfig extends Config {
         return true;
     }
 
+    @ConfigItem(
+            keyName = "kittenFood",
+            name = "Kitten food",
+            description = "Food to feed your kitten. 'Any available food' uses the first valid item in your inventory.",
+            position = 7
+    )
+    default KittenFood kittenFood() {
+        return KittenFood.ANY;
+    }
+
+    @ConfigItem(
+            keyName = "autoFeed",
+            name = "Automatically feed kitten",
+            description = "Uses the selected food from your inventory when your kitten gets hungry",
+            position = 8
+    )
+    default boolean autoFeed() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "autoPlay",
+            name = "Automatically play with kitten",
+            description = "Keeps your kitten happy when it starts getting neglected",
+            position = 9
+    )
+    default boolean autoPlay() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "useBallOfWool",
+            name = "Use ball of wool for attention",
+            description = "Uses a ball of wool on the kitten when available, giving much longer between interactions. Falls back to stroking when you have no wool.",
+            position = 10
+    )
+    default boolean useBallOfWool() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "preventIdleLogout",
+            name = "Prevent idle logout",
+            description = "Presses Backspace before the client idles out, so you can leave your kitten to grow unattended",
+            position = 11
+    )
+    default boolean preventIdleLogout() {
+        return false;
+    }
+
 
     @ConfigItem(
             keyName = "felineId",

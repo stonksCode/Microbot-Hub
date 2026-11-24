@@ -3,6 +3,13 @@ package net.runelite.client.plugins.microbot.delveprayerhelper;
 import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Projectile;
+import net.runelite.api.events.AnimationChanged;
+import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.ClientTick;
+import net.runelite.api.events.GraphicsObjectCreated;
+import net.runelite.api.events.HitsplatApplied;
+import net.runelite.api.events.NpcDespawned;
+import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.events.ProjectileMoved;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -30,7 +37,7 @@ import java.awt.*;
 @Slf4j
 public class DelvePrayerHelperPlugin extends Plugin {
 
-	static final String version = "1.0.0";
+	static final String version = "1.3.6";
 
     @Inject
     private DelvePrayerHelperConfig config;
@@ -47,18 +54,31 @@ public class DelvePrayerHelperPlugin extends Plugin {
     @Inject
     private DelvePrayerHelperScript delvePrayerHelperScript;
 
+    @Inject
+    private DelveFightLogger fightLogger;
+
 
     @Override
     protected void startUp() throws AWTException {
         if (overlayManager != null) {
             overlayManager.add(delvePrayerHelperOverlay);
         }
+        fightLogger.start();
         delvePrayerHelperScript.run();
     }
 
     protected void shutDown() {
         delvePrayerHelperScript.shutdown();
+        fightLogger.stop();
         overlayManager.remove(delvePrayerHelperOverlay);
+    }
+
+    @Subscribe
+    public void onClientTick(ClientTick e)
+    {
+        // Runs on the client thread every ~20ms. Everything the fast prayer loop needs is cached
+        // here, so the loop never has to hop onto the client thread (a hop can take a whole tick).
+        delvePrayerHelperScript.onClientTick();
     }
 
     @Subscribe
@@ -66,16 +86,49 @@ public class DelvePrayerHelperPlugin extends Plugin {
     {
         Projectile projectile = e.getProjectile();
 
-        boolean isMeleeAttack = projectile.getId() == DelvePrayerHelperProjectile.MELEE.getProjectileID();
-        boolean isMageAttack = projectile.getId() == DelvePrayerHelperProjectile.MAGE.getProjectileID();
-        boolean isRangeAttack = projectile.getId() == DelvePrayerHelperProjectile.RANGE.getProjectileID();
+        // Log every projectile, including ids the helper does not map, so unknown attacks in deeper
+        // delves can be identified from the fight log.
+        fightLogger.logProjectile(projectile, DelvePrayerHelperProjectile.protectionFor(projectile.getId()));
 
-        if (!(isMeleeAttack || isMageAttack || isRangeAttack))
+        if (DelvePrayerHelperProjectile.isAttackProjectile(projectile.getId()))
         {
-            return;
+            delvePrayerHelperScript.trackProjectile(projectile);
         }
+    }
 
-        int hitCycle = projectile.getEndCycle();
-        delvePrayerHelperScript.incomingProjectiles.put(hitCycle, projectile);
+    @Subscribe
+    public void onNpcSpawned(NpcSpawned e)
+    {
+        fightLogger.logNpc(e.getNpc(), true);
+    }
+
+    @Subscribe
+    public void onNpcDespawned(NpcDespawned e)
+    {
+        fightLogger.logNpc(e.getNpc(), false);
+    }
+
+    @Subscribe
+    public void onAnimationChanged(AnimationChanged e)
+    {
+        fightLogger.logAnimation(e.getActor());
+    }
+
+    @Subscribe
+    public void onHitsplatApplied(HitsplatApplied e)
+    {
+        fightLogger.logHitsplat(e);
+    }
+
+    @Subscribe
+    public void onGraphicsObjectCreated(GraphicsObjectCreated e)
+    {
+        fightLogger.logGraphicsObject(e);
+    }
+
+    @Subscribe
+    public void onChatMessage(ChatMessage e)
+    {
+        fightLogger.logChat(e);
     }
 }

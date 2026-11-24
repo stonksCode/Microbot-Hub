@@ -1,11 +1,11 @@
 package net.runelite.client.plugins.microbot.DemonicGorillaKiller;
 
-
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
+import net.runelite.client.util.QuantityFormatter;
 
 import javax.inject.Inject;
 import java.awt.*;
@@ -22,55 +22,33 @@ public class DemonicGorillaOverlay extends OverlayPanel {
         setNaughty();
     }
 
-
     @Override
     public Dimension render(Graphics2D graphics) {
         try {
             panelComponent.setPreferredSize(new Dimension(200, 300));
             panelComponent.getChildren().add(TitleComponent.builder()
-                    .text("Demonic Gorilla - v" + plugin.version)
+                    .text("Demonic Gorilla - v" + DemonicGorillaPlugin.version)
                     .color(Color.GREEN)
                     .build());
             panelComponent.getChildren().add(LineComponent.builder().build());
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Running: " + plugin.getTimeRunning())
-                    .leftColor(Color.WHITE)
-                    .build());
-            var state = DemonicGorillaScript.BOT_STATUS == DemonicGorillaScript.State.TRAVEL_TO_GORILLAS ? DemonicGorillaScript.travelStep : DemonicGorillaScript.BOT_STATUS;
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Script status: " + state)
-                    .leftColor(Color.WHITE)
-                    .build());
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Microbot status: " + Microbot.status)
-                    .leftColor(Color.WHITE)
-                    .build());
-            var lootRecord = Microbot.getAggregateLootRecords("Demonic Gorilla");
-            var killValue = lootRecord == null ? "0" : String.valueOf(lootRecord.getKills());
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Kill Count: " + DemonicGorillaScript.killCount + " / " + killValue)
-                    .leftColor(Color.WHITE)
-                    .build());
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Current trip kill count: " + DemonicGorillaScript.currentTripKillCount)
-                    .leftColor(Color.WHITE)
-                    .build());
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Total loot: " + Microbot.getAggregateLootRecordsTotalGevalue("Demonic Gorilla"))
-                    .leftColor(Color.WHITE)
-                    .build());
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Current defensive prayer: " + DemonicGorillaScript.currentDefensivePrayer)
-                    .leftColor(Color.WHITE)
-                    .build());
-            panelComponent.getChildren().add(LineComponent.builder()
-                    .left("Current gear: " + DemonicGorillaScript.currentGear)
-                    .leftColor(Color.WHITE)
-                    .build());
-
+            addRow("Running: " + plugin.getTimeRunning());
+            addRow("Script status: " + DemonicGorillaScript.BOT_STATUS);
+            addRow("Microbot status: " + Microbot.status);
+            addRow("Kill count: " + DemonicGorillaScript.killCount);
+            addRow("Current trip kill count: " + DemonicGorillaScript.currentTripKillCount);
+            addRow("Total loot: " + QuantityFormatter.formatNumber(DemonicGorillaScript.totalLootValue));
+            addRow("Current defensive prayer: " + DemonicGorillaScript.currentDefensivePrayer);
+            addRow("Current gear: " + DemonicGorillaScript.currentGear);
         } catch (Exception ex) {
-            System.out.println(ex.getMessage());
+            System.out.println("Demonic Gorilla overlay: " + ex.getMessage());
         }
         return super.render(graphics);
+    }
+
+    private void addRow(String text) {
+        panelComponent.getChildren().add(LineComponent.builder()
+                .left(text)
+                .leftColor(Color.WHITE)
+                .build());
     }
 }

@@ -5,6 +5,8 @@ public enum FletchingMode {
     BOLTS("Bolts"),
     ARROWS("Arrows"),
     JAVELINS("Javelins"),
+    ARROW_SHAFTS("Arrow shafts"),
+    JAVELIN_SHAFTS("Javelin shafts"),
     BOWS("Bows"),
     CROSSBOWS("Crossbows"),
     SHIELDS("Shields");

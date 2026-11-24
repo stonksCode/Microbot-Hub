@@ -55,8 +55,11 @@ public class FixedSizeQueue<E> extends LinkedList<E> {
         super.addLast(element);
     }
 
-    @Deprecated
-    public LinkedList<E> getAll() {
-        return this;
+    /**
+     * Returns a copy of the queue so callers can safely iterate it while the client thread
+     * keeps adding new locations.
+     */
+    public LinkedList<E> snapshot() {
+        return new LinkedList<>(this);
     }
 }

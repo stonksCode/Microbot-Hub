@@ -121,7 +121,7 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "useSpecialAttack",
             name = "Use Special Attack",
-            description = "Enable the special attack of the equipped weapon while fighting when enough energy is available",
+            description = "Enable the special attack orb while fighting when the equipped weapon has enough energy. Also implied by Use Special Attack Gear",
             section = tormentedDemonSection,
             position = 8
     )
@@ -138,6 +138,19 @@ public interface TormentedDemonConfig extends Config {
     )
     default boolean debugPrayer() {
         return false;
+    }
+
+    @ConfigItem(
+            keyName = "gearSwitchMode",
+            name = "Gear Switch Mode",
+            description = "How gear swaps are performed. Normal = regular simulated mouse clicks. "
+                    + "Quick = mouse clicks with a much shorter press/settle (still moves the mouse, but roughly twice as fast). "
+                    + "Instant = every equip queued in a single game tick with no mouse movement (fastest, but the most robotic)",
+            section = tormentedDemonSection,
+            position = 10
+    )
+    default GearSwitchMode gearSwitchMode() {
+        return GearSwitchMode.QUICK;
     }
 
 
@@ -339,6 +352,31 @@ public interface TormentedDemonConfig extends Config {
         return true;
     }
 
+    @ConfigItem(
+            keyName = "inventoryFullAction",
+            name = "When Inventory Is Full",
+            description = "What to try first when looting needs an inventory slot. Do nothing leaves the item on the ground; "
+                    + "Stop plugin disables the plugin with a message; Eat food for space eats one food; "
+                    + "Scatter ashes/bones scatters one ashes item or buries one bones item; "
+                    + "Demonic Offering casts the Arceuus spell if you can cast it and are carrying demonic ashes",
+            section = lootingSection,
+            position = 17
+    )
+    default InventoryFullAction inventoryFullAction() {
+        return InventoryFullAction.EAT_FOOD;
+    }
+
+    @ConfigItem(
+            keyName = "inventoryFullFallback",
+            name = "If That Fails (Fallback)",
+            description = "Tried when the first option does not free an inventory slot. If this also fails, the plugin stops with an 'Inventory full' message",
+            section = lootingSection,
+            position = 18
+    )
+    default InventoryFullAction inventoryFullFallback() {
+        return InventoryFullAction.STOP_PLUGIN;
+    }
+
 
 
     @ConfigSection(
@@ -351,7 +389,7 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "minEatPercent",
             name = "Minimum Health Percent",
-            description = "Percentage of health below which the bot will eat food",
+            description = "Percentage of health below which the bot will eat food. In Combat Only this is also the point where it stops if no food is left",
             section = bankingAndSuppliesSection,
             position = 0
     )
@@ -366,7 +404,7 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "minPrayerPercent",
             name = "Minimum Prayer Percent",
-            description = "Percentage of prayer points below which the bot will drink a prayer potion or retreat",
+            description = "Percentage of prayer points below which the bot will drink a prayer potion. If no prayer doses are left, Full Auto retreats and Combat Only stops",
             section = bankingAndSuppliesSection,
             position = 1
     )
@@ -381,7 +419,7 @@ public interface TormentedDemonConfig extends Config {
     @ConfigItem(
             keyName = "healthThreshold",
             name = "Health Threshold to Exit",
-            description = "Minimum health percentage to stay and fight",
+            description = "Health percentage at which the bot leaves combat. Full Auto retreats and restocks; Combat Only stops the plugin",
             section = bankingAndSuppliesSection,
             position = 2
     )
@@ -393,13 +431,23 @@ public interface TormentedDemonConfig extends Config {
         return 30;
     }
 
+    @ConfigItem(
+            keyName = "stopWhenOutOfSupplies",
+            name = "Stop When Out of Supplies",
+            description = "Stop when no food or prayer potion is left. Full Auto retreats and stops if the bank cannot supply the setup; Combat Only stops in place",
+            section = bankingAndSuppliesSection,
+            position = 3
+    )
+    default boolean stopWhenOutOfSupplies() {
+        return true;
+    }
 
     @ConfigItem(
             keyName = "combatPotionType",
             name = "Combat Potion Type",
             description = "Select the type of combat potion to use",
             section = bankingAndSuppliesSection,
-            position = 3
+            position = 4
     )
     default CombatPotionType combatPotionType() {
         return CombatPotionType.SUPER_COMBAT;
@@ -410,7 +458,7 @@ public interface TormentedDemonConfig extends Config {
             name = "Ranging Potion Type",
             description = "Select the type of ranging potion to use",
             section = bankingAndSuppliesSection,
-            position = 4
+            position = 5
     )
     default RangingPotionType rangingPotionType() {
         return RangingPotionType.RANGING;
@@ -421,7 +469,7 @@ public interface TormentedDemonConfig extends Config {
             name = "% Boosted Stats Threshold",
             description = "The threshold for using a potion when the boosted stats are below the maximum.",
             section = bankingAndSuppliesSection,
-            position = 5
+            position = 6
     )
     @Range(
             min = 1,
@@ -429,6 +477,30 @@ public interface TormentedDemonConfig extends Config {
     )
     default int boostedStatsThreshold() {
         return 10;
+    }
+
+    @ConfigItem(
+            keyName = "emergencyTeleport",
+            name = "Emergency Teleport on Stop",
+            description = "When a supply stop happens while still in combat, teleport out before the plugin disables itself. Prevents being left in the cave with nothing to heal",
+            section = bankingAndSuppliesSection,
+            position = 7
+    )
+    default boolean emergencyTeleport() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "emergencyTeleportMethod",
+            name = "Emergency Teleport Method",
+            description = "Teleport used before stopping. Items and teleport tabs are used from the inventory; jewellery is worn automatically. "
+                    + "If the selected teleport is unavailable, the plugin works down a list of bank-adjacent fallbacks "
+                    + "(dueling ring, glory, wealth, seed pod, Varrock/Lumbridge/Falador tabs, ...) and finally the Guthixian temple teleport",
+            section = bankingAndSuppliesSection,
+            position = 8
+    )
+    default EmergencyTeleportMethod emergencyTeleportMethod() {
+        return EmergencyTeleportMethod.RING_OF_DUELING;
     }
 
     @ConfigSection(
@@ -441,13 +513,124 @@ public interface TormentedDemonConfig extends Config {
 
     @ConfigItem(
             keyName = "copyGear",
-            name = "Copy Gear Setup",
-            description = "Click to copy your currently equipped gear to the clipboard",
+            name = "Copy Current Gear",
+            description = "Click to copy the names of your currently equipped items to the clipboard as a comma separated list. Keep the plugin enabled while clicking.",
             section = gearSettingsSection,
             position = 0
     )
     default ConfigButton copyGear() {
         return new ConfigButton();
+    }
+
+    @ConfigItem(
+            keyName = "usePunishGear",
+            name = "Use Punish Gear",
+            description = "Swap to punish gear for the first shield-down hit after the fire bomb and dodge, chosen by the demon's overhead prayer",
+            section = gearSettingsSection,
+            position = 7
+    )
+    default boolean usePunishGear() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "punishGearVsMelee",
+            name = "Punish Gear vs Melee Prayer",
+            description = "Gear to use when demon has Protect from Melee overhead (e.g. ranged/ballistae or magic)",
+            section = gearSettingsSection,
+            position = 8
+    )
+    default String punishGearVsMelee() {
+        return " ";
+    }
+
+    @ConfigItem(
+            keyName = "punishGearVsRange",
+            name = "Punish Gear vs Ranged Prayer",
+            description = "Gear to use when demon has Protect from Ranged overhead (e.g. crush melee/granite maul)",
+            section = gearSettingsSection,
+            position = 9
+    )
+    default String punishGearVsRange() {
+        return " ";
+    }
+
+    @ConfigItem(
+            keyName = "punishGearVsMagic",
+            name = "Punish Gear vs Magic Prayer",
+            description = "Gear to use when demon has Protect from Magic overhead (e.g. melee or ranged)",
+            section = gearSettingsSection,
+            position = 10
+    )
+    default String punishGearVsMagic() {
+        return " ";
+    }
+
+    @ConfigItem(
+            keyName = "useSpecialAttackGear",
+            name = "Use Special Attack Gear",
+            description = "Swap to special attack gear while the demon is defenceless and energy meets the threshold. Also enables the special attack orb, so this alone is enough to use specs",
+            section = gearSettingsSection,
+            position = 11
+    )
+    default boolean useSpecialAttackGear() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "specialAttackGear",
+            name = "Special Attack Gear (Fallback)",
+            description = "Gear/weapon for special attack during defenseless phase when none of the per-prayer special attack gear boxes are set. Leave blank to never use special attack gear",
+            section = gearSettingsSection,
+            position = 12
+    )
+    default String specialAttackGear() {
+        return " ";
+    }
+
+    @ConfigItem(
+            keyName = "specialAttackGearVsMelee",
+            name = "Special Attack Gear vs Melee Prayer",
+            description = "Spec gear to use when the demon has Protect from Melee overhead. Leave blank to not special attack against this prayer (e.g. keep the Blue Moon spear away when its set is not worn)",
+            section = gearSettingsSection,
+            position = 13
+    )
+    default String specialAttackGearVsMelee() {
+        return " ";
+    }
+
+    @ConfigItem(
+            keyName = "specialAttackGearVsRange",
+            name = "Special Attack Gear vs Ranged Prayer",
+            description = "Spec gear to use when the demon has Protect from Ranged overhead. Leave blank to not special attack against this prayer",
+            section = gearSettingsSection,
+            position = 14
+    )
+    default String specialAttackGearVsRange() {
+        return " ";
+    }
+
+    @ConfigItem(
+            keyName = "specialAttackGearVsMagic",
+            name = "Special Attack Gear vs Magic Prayer",
+            description = "Spec gear to use when the demon has Protect from Magic overhead. Leave blank to not special attack against this prayer",
+            section = gearSettingsSection,
+            position = 15
+    )
+    default String specialAttackGearVsMagic() {
+        return " ";
+    }
+
+    @ConfigItem(
+            keyName = "specialAttackThreshold",
+            name = "Special Attack Threshold",
+            description = "Minimum special attack energy as a percentage of the full bar (0-100). The orb is used while energy is at or above this value and turned off once it drops below",
+            section = gearSettingsSection,
+            position = 16
+    )
+    @Range(min = 0, max = 100)
+    default int specialAttackThreshold() {
+        return 25;
     }
 
     @ConfigItem(
@@ -587,9 +770,132 @@ public interface TormentedDemonConfig extends Config {
         return MagicOffensivePrayer.AUTO;
     }
 
+    @ConfigSection(
+            name = "Overlay",
+            description = "Reset the overlay statistics and choose which stats are shown",
+            position = 7,
+            closedByDefault = false
+    )
+    String overlaySection = "overlay";
+
+    @ConfigItem(
+            keyName = "resetStats",
+            name = "Reset Statistics",
+            description = "Click to reset the kill count, average and last kill time, and this trip's loot totals",
+            section = overlaySection,
+            position = 0
+    )
+    default ConfigButton resetStats() {
+        return new ConfigButton();
+    }
+
+    @ConfigItem(
+            keyName = "showStatus",
+            name = "Show Status",
+            description = "Show the current plugin status (Banking, Travelling, Fighting, ...) on the overlay",
+            section = overlaySection,
+            position = 1
+    )
+    default boolean showStatus() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "showKillCount",
+            name = "Show Kill Count",
+            description = "Show the session kill count on the overlay",
+            section = overlaySection,
+            position = 2
+    )
+    default boolean showKillCount() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "showAverageKillTime",
+            name = "Show Average Kill Time",
+            description = "Show the average kill time on the overlay",
+            section = overlaySection,
+            position = 3
+    )
+    default boolean showAverageKillTime() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "showLastKillTime",
+            name = "Show Last Kill Time",
+            description = "Show the duration of the most recent kill on the overlay",
+            section = overlaySection,
+            position = 4
+    )
+    default boolean showLastKillTime() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "showTripLoot",
+            name = "Show Loot This Trip",
+            description = "Show the total Grand Exchange value of items looted since the current trip began",
+            section = overlaySection,
+            position = 5
+    )
+    default boolean showTripLoot() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "showAverageLoot",
+            name = "Show Average Loot Per Kill",
+            description = "Show this trip's loot value divided by its kill count",
+            section = overlaySection,
+            position = 6
+    )
+    default boolean showAverageLoot() {
+        return true;
+    }
+
     enum MODE {
         FULL_AUTO,
         COMBAT_ONLY
+    }
+
+    @Getter
+    enum GearSwitchMode {
+        NORMAL("Normal (mouse clicks)"),
+        QUICK("Quick clicks"),
+        INSTANT("Instant (one tick)");
+
+        private final String label;
+
+        GearSwitchMode(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    @Getter
+    enum InventoryFullAction {
+        DO_NOTHING("Do nothing"),
+        STOP_PLUGIN("Stop plugin"),
+        EAT_FOOD("Eat food for space"),
+        SCATTER_ASHES("Scatter ashes/bones"),
+        DEMONIC_OFFERING("Demonic Offering");
+
+        private final String label;
+
+        InventoryFullAction(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
     }
 
     @Getter
@@ -604,6 +910,36 @@ public interface TormentedDemonConfig extends Config {
         RANGING,
         DIVINE_RANGING,
         BASTION
+    }
+
+    @Getter
+    enum EmergencyTeleportMethod {
+        RING_OF_DUELING("Ring of Dueling (Ferox Enclave)"),
+        AMULET_OF_GLORY("Amulet of Glory (Edgeville)"),
+        RING_OF_WEALTH("Ring of Wealth (Grand Exchange)"),
+        SKILLS_NECKLACE("Skills Necklace (Fishing Guild)"),
+        COMBAT_BRACELET("Combat Bracelet (Warriors' Guild)"),
+        ROYAL_SEED_POD("Royal seed pod (Tree Gnome Stronghold)"),
+        VARROCK_TAB("Teleport tab: Varrock"),
+        LUMBRIDGE_TAB("Teleport tab: Lumbridge"),
+        FALADOR_TAB("Teleport tab: Falador"),
+        CAMELOT_TAB("Teleport tab: Camelot"),
+        ARDOUGNE_TAB("Teleport tab: Ardougne"),
+        WATCHTOWER_TAB("Teleport tab: Watchtower (Yanille)"),
+        HOUSE_TAB("Teleport tab: House"),
+        GUTHIXIAN_TEMPLE("Guthixian temple teleport"),
+        NONE("None");
+
+        private final String label;
+
+        EmergencyTeleportMethod(String label) {
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
     }
 
     enum MeleeOffensivePrayer {

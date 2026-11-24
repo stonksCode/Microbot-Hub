@@ -2,6 +2,7 @@ package net.runelite.client.plugins.microbot.autobankstander.skills.magic;
 
 public enum MagicMethod {
     ENCHANTING("Bolt enchanting"),
+    JEWELRY_ENCHANTING("Jewellery enchanting"),
     LUNARS("Lunar spells"),
     ALCHING("High/Low alchemy"),
     SUPERHEATING("Superheating");

@@ -41,6 +41,9 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.PluginConstants;
+import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
+import net.runelite.client.plugins.microbot.util.math.Rs2Random;
+import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.ui.overlay.infobox.InfoBoxManager;
@@ -49,6 +52,7 @@ import net.runelite.client.util.Text;
 import org.apache.commons.lang3.StringUtils;
 
 import javax.inject.Inject;
+import java.awt.event.KeyEvent;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -61,7 +65,7 @@ import java.util.List;
 @Slf4j
 @PluginDescriptor(
         name = PluginDescriptor.See1Duck + " Kitten Tracker",
-        description = "Automates the kitten growth process and provides notifications",
+        description = "Automates kitten feeding and play, tracks growth, and can prevent idle logout",
         tags = {"cat", "kitten", "duck", "s1d", "see1duck", "microbot"},
         version = KittenPlugin.version,
         minClientVersion = "2.0.13",
@@ -71,7 +75,7 @@ import java.util.List;
         isExternal = PluginConstants.IS_EXTERNAL
 )
 public class KittenPlugin extends Plugin {
-    public static final String version = "1.3.1";
+    public static final String version = "1.5.0";
     private static final int VAR_PLAYER_FOLLOWER = 447;
     private static final int WIDGET_ID_DIALOG_NOTIFICATION_GROUP_ID = 229;
     private static final int WIDGET_ID_DIALOG_PLAYER_TEXT = 6;
@@ -221,6 +225,9 @@ public class KittenPlugin extends Plugin {
 
     private boolean attentionNotificationSend = false;
     private boolean hungryNotificationSend = false;
+
+    // Randomised so the anti-idle key press never lands on a perfectly predictable tick.
+    private int idleLogoutDelay = Rs2Random.between(7500, 10000);
 
     private final HashMap<Integer, Instant> openedWidgets = new HashMap<>();
 
@@ -744,6 +751,14 @@ public class KittenPlugin extends Plugin {
 
     @Subscribe
     public void onGameTick(GameTick tick) {
+
+        // Keep the client alive while the kitten grows. Mirrors QoL's "Never log out":
+        // checkIdleLogout fires a little before the idle timeout, giving us room to retry.
+        if (config.preventIdleLogout() && Microbot.isLoggedIn()
+                && Rs2Player.checkIdleLogout(idleLogoutDelay)) {
+            idleLogoutDelay = Rs2Random.between(7500, 10000);
+            Rs2Keyboard.keyPress(KeyEvent.VK_BACK_SPACE);
+        }
 
         // need to update secondsInTick regularly to keep timers tracking properly... but make sure it's not null (kitten is not out)
         if (null != growthTickStartTime) {

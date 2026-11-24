@@ -19,14 +19,13 @@ import net.runelite.client.ui.overlay.OverlayManager;
 import javax.inject.Inject;
 import java.awt.*;
 import java.time.Instant;
-import java.util.concurrent.ScheduledExecutorService;
 
 @PluginDescriptor(
         name = PluginDescriptor.TaFCat + "Demonic Gorillas",
         description = "Automates restocking, prayer flicking, and gear switching during Demonic Gorillas",
         tags = {"demonic", "Gorilla", "flicker", "weapon", "switch", "microbot"},
         version = DemonicGorillaPlugin.version,
-        minClientVersion = "2.0.13",
+        minClientVersion = "2.6.58",
         cardUrl = "",
         iconUrl = "",
         enabledByDefault = PluginConstants.DEFAULT_ENABLED,
@@ -35,11 +34,10 @@ import java.util.concurrent.ScheduledExecutorService;
 @Slf4j
 public class DemonicGorillaPlugin extends Plugin {
 
-    public final static String version = "1.2.5";
+    public final static String version = "1.3.0";
 
     private static final int DEMONIC_GORILLA_ROCK = 856;
-    public static FixedSizeQueue<WorldPoint> lastLocation = new FixedSizeQueue<>(2);
-    private ScheduledExecutorService scheduledExecutorService;
+    public static final FixedSizeQueue<WorldPoint> lastLocation = new FixedSizeQueue<>(2);
     @Inject
     private DemonicGorillaConfig config;
     @Inject
@@ -72,9 +70,7 @@ public class DemonicGorillaPlugin extends Plugin {
         demonicGorillaScript.shutdown();
         lootScript.shutdown();
         overlayManager.remove(demonicGorillaOverlay);
-        if (scheduledExecutorService != null && !scheduledExecutorService.isShutdown()) {
-            scheduledExecutorService.shutdown();
-        }
+        lastLocation.clear();
     }
 
     protected String getTimeRunning() {
@@ -92,9 +88,7 @@ public class DemonicGorillaPlugin extends Plugin {
 
     @Subscribe
     public void onGameTick(GameTick gameTick) {
-        var currentLocation = Rs2Player.getWorldLocation();
-        DemonicGorillaScript.playerMoved = !lastLocation.contains(currentLocation);
-        lastLocation.add(currentLocation);
+        lastLocation.add(Rs2Player.getWorldLocation());
         DemonicGorillaScript.gameTickCount++;
     }
 }

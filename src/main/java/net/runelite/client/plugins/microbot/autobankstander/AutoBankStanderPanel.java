@@ -10,9 +10,18 @@ import net.runelite.client.plugins.microbot.autobankstander.skills.herblore.enum
 import net.runelite.client.plugins.microbot.autobankstander.skills.herblore.enums.Mode;
 import net.runelite.client.plugins.microbot.autobankstander.skills.herblore.enums.UnfinishedPotionMode;
 import net.runelite.client.plugins.microbot.autobankstander.skills.magic.MagicMethod;
+import net.runelite.client.plugins.microbot.autobankstander.skills.magic.SuperheatOre;
 import net.runelite.client.plugins.microbot.autobankstander.skills.magic.enchanting.BoltType;
+import net.runelite.client.plugins.microbot.autobankstander.skills.magic.enchanting.JewelleryType;
+import net.runelite.client.plugins.microbot.autobankstander.skills.magic.lunars.LunarSpell;
+import net.runelite.client.plugins.microbot.autobankstander.skills.crafting.CraftingMethod;
+import net.runelite.client.plugins.microbot.autobankstander.skills.crafting.CraftingProcessor;
+import net.runelite.client.plugins.microbot.autobankstander.skills.cooking.CookingMethod;
+import net.runelite.client.plugins.microbot.autobankstander.skills.cooking.CookingProcessor;
 import net.runelite.client.plugins.microbot.autobankstander.skills.fletching.enums.FletchingMode;
 import net.runelite.client.plugins.microbot.autobankstander.skills.fletching.enums.ArrowType;
+import net.runelite.client.plugins.microbot.autobankstander.skills.fletching.enums.ArrowShaftType;
+import net.runelite.client.plugins.microbot.autobankstander.skills.fletching.enums.JavelinShaftType;
 import net.runelite.client.plugins.microbot.autobankstander.skills.fletching.enums.BowType;
 import net.runelite.client.plugins.microbot.autobankstander.skills.fletching.enums.CrossbowType;
 import net.runelite.client.plugins.microbot.autobankstander.skills.fletching.enums.DartType;
@@ -102,6 +111,10 @@ public class AutoBankStanderPanel extends PluginPanel {
                 selectedBankSkill = BankStandingSkill.HERBLORE;
             } else if (currentConfig.getSkill() == SkillType.FLETCHING) {
                 selectedBankSkill = BankStandingSkill.FLETCHING;
+            } else if (currentConfig.getSkill() == SkillType.CRAFTING) {
+                selectedBankSkill = BankStandingSkill.CRAFTING;
+            } else if (currentConfig.getSkill() == SkillType.COOKING) {
+                selectedBankSkill = BankStandingSkill.COOKING;
             }
             log.info("Loaded configuration from plugin: {}", currentConfig);
         }
@@ -211,9 +224,12 @@ public class AutoBankStanderPanel extends PluginPanel {
         } else if (bankSkill == BankStandingSkill.FLETCHING) {
             currentConfig.setSkill(SkillType.FLETCHING);
             updateMethodAndConfigArea();
-        } else {
-            // show coming soon for other skills
-            showComingSoon(bankSkill.getSkill().getName());
+        } else if (bankSkill == BankStandingSkill.CRAFTING) {
+            currentConfig.setSkill(SkillType.CRAFTING);
+            updateMethodAndConfigArea();
+        } else if (bankSkill == BankStandingSkill.COOKING) {
+            currentConfig.setSkill(SkillType.COOKING);
+            updateMethodAndConfigArea();
         }
         
         log.info("Selected skill: {}", bankSkill);
@@ -230,8 +246,13 @@ public class AutoBankStanderPanel extends PluginPanel {
             createHerbloreMethodButtons();
         } else if (selectedBankSkill == BankStandingSkill.FLETCHING) {
             createFletchingMethodButtons();
+        } else if (selectedBankSkill == BankStandingSkill.CRAFTING) {
+            createCraftingMethodButtons();
+        } else if (selectedBankSkill == BankStandingSkill.COOKING) {
+            createCookingMethodButtons();
         }
-        
+
+
         methodButtonPanel.revalidate();
         methodButtonPanel.repaint();
         configurationPanel.revalidate();
@@ -312,13 +333,78 @@ public class AutoBankStanderPanel extends PluginPanel {
                 boltPanel.add(boltDropdown);
                 configurationPanel.add(boltPanel);
                 break;
-            default:
-                JLabel placeholder = new JLabel(method.getDisplayName() + " configuration (coming soon)");
-                placeholder.setFont(FontManager.getRunescapeSmallFont());
-                
-                JPanel placeholderPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
-                placeholderPanel.add(placeholder);
-                configurationPanel.add(placeholderPanel);
+
+            case JEWELRY_ENCHANTING:
+                JComboBox<JewelleryType> jewelleryDropdown = new JComboBox<>(JewelleryType.values());
+                jewelleryDropdown.setSelectedItem(currentConfig.getJewelleryType());
+                jewelleryDropdown.addActionListener(e -> currentConfig.setJewelleryType(
+                        (JewelleryType) jewelleryDropdown.getSelectedItem()));
+
+                JPanel jewelleryPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+                jewelleryPanel.add(jewelleryDropdown);
+                configurationPanel.add(jewelleryPanel);
+                break;
+
+            case ALCHING:
+                JPanel alchPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 0));
+                JTextField alchItemField = new JTextField(currentConfig.getAlchItemName(), 16);
+                alchItemField.setToolTipText("Exact name of the item to alch (e.g. Runite platebody)");
+                alchItemField.addActionListener(e -> currentConfig.setAlchItemName(alchItemField.getText().trim()));
+                alchItemField.addFocusListener(new java.awt.event.FocusAdapter() {
+                    @Override
+                    public void focusLost(java.awt.event.FocusEvent e) {
+                        currentConfig.setAlchItemName(alchItemField.getText().trim());
+                    }
+                });
+
+                JComboBox<String> alchTypeDropdown = new JComboBox<>(new String[]{"High alchemy", "Low alchemy"});
+                alchTypeDropdown.setSelectedIndex(currentConfig.isHighAlchemy() ? 0 : 1);
+                alchTypeDropdown.addActionListener(e -> currentConfig.setHighAlchemy(alchTypeDropdown.getSelectedIndex() == 0));
+
+                alchPanel.add(alchItemField);
+                alchPanel.add(alchTypeDropdown);
+                configurationPanel.add(alchPanel);
+                break;
+
+            case SUPERHEATING:
+                JComboBox<SuperheatOre> oreDropdown = new JComboBox<>(SuperheatOre.values());
+                oreDropdown.setSelectedItem(currentConfig.getSuperheatOre());
+                oreDropdown.addActionListener(e -> currentConfig.setSuperheatOre(
+                        (SuperheatOre) oreDropdown.getSelectedItem()));
+
+                JPanel orePanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+                orePanel.add(oreDropdown);
+                configurationPanel.add(orePanel);
+                break;
+
+            case LUNARS:
+                JComboBox<LunarSpell> lunarSpellDropdown = new JComboBox<>(LunarSpell.values());
+                lunarSpellDropdown.setSelectedItem(currentConfig.getLunarSpell());
+
+                String[] lunarSelections = LunarSpell.getSelections(currentConfig.getLunarSpell());
+                JComboBox<String> lunarSelectionDropdown = new JComboBox<>(lunarSelections);
+                String currentLunarSelection = currentConfig.getLunarSelection();
+                if (currentLunarSelection == null
+                        || !java.util.Arrays.asList(lunarSelections).contains(currentLunarSelection)) {
+                    currentLunarSelection = LunarSpell.getDefaultSelection(currentConfig.getLunarSpell());
+                    currentConfig.setLunarSelection(currentLunarSelection);
+                }
+                lunarSelectionDropdown.setSelectedItem(currentLunarSelection);
+
+                lunarSpellDropdown.addActionListener(e -> {
+                    LunarSpell spell = (LunarSpell) lunarSpellDropdown.getSelectedItem();
+                    currentConfig.setLunarSpell(spell);
+                    lunarSelectionDropdown.setModel(new DefaultComboBoxModel<>(LunarSpell.getSelections(spell)));
+                    currentConfig.setLunarSelection(LunarSpell.getDefaultSelection(spell));
+                    lunarSelectionDropdown.setSelectedItem(currentConfig.getLunarSelection());
+                });
+                lunarSelectionDropdown.addActionListener(e -> currentConfig.setLunarSelection(
+                        (String) lunarSelectionDropdown.getSelectedItem()));
+
+                JPanel lunarPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 0));
+                lunarPanel.add(lunarSpellDropdown);
+                lunarPanel.add(lunarSelectionDropdown);
+                configurationPanel.add(lunarPanel);
                 break;
         }
         
@@ -463,6 +549,30 @@ public class AutoBankStanderPanel extends PluginPanel {
                 configurationPanel.add(javelinPanel);
                 break;
                 
+            case ARROW_SHAFTS:
+                JComboBox<ArrowShaftType> arrowShaftDropdown = new JComboBox<>(ArrowShaftType.values());
+                arrowShaftDropdown.setSelectedItem(currentConfig.getArrowShaftType());
+                arrowShaftDropdown.addActionListener(e -> {
+                    currentConfig.setArrowShaftType((ArrowShaftType) arrowShaftDropdown.getSelectedItem());
+                });
+
+                JPanel arrowShaftPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+                arrowShaftPanel.add(arrowShaftDropdown);
+                configurationPanel.add(arrowShaftPanel);
+                break;
+
+            case JAVELIN_SHAFTS:
+                JComboBox<JavelinShaftType> javelinShaftDropdown = new JComboBox<>(JavelinShaftType.values());
+                javelinShaftDropdown.setSelectedItem(currentConfig.getJavelinShaftType());
+                javelinShaftDropdown.addActionListener(e -> {
+                    currentConfig.setJavelinShaftType((JavelinShaftType) javelinShaftDropdown.getSelectedItem());
+                });
+
+                JPanel javelinShaftPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+                javelinShaftPanel.add(javelinShaftDropdown);
+                configurationPanel.add(javelinShaftPanel);
+                break;
+
             case BOWS:
                 JComboBox<BowType> bowDropdown = new JComboBox<>(BowType.values());
                 bowDropdown.setSelectedItem(currentConfig.getBowType());
@@ -507,6 +617,110 @@ public class AutoBankStanderPanel extends PluginPanel {
         configurationPanel.repaint();
     }
     
+    private void createCraftingMethodButtons() {
+        CraftingMethod[] methods = CraftingMethod.values();
+        setupMethodButtonGrid(methodButtonPanel, methods.length);
+
+        for (CraftingMethod method : methods) {
+            JButton methodButton = createMethodButton(method.getDisplayName());
+            methodButton.addActionListener(e -> {
+                selectMethodButton(methodButton);
+                currentConfig.setCraftingMethod(method);
+                currentConfig.setCraftingRecipe(CraftingProcessor.getDefaultRecipe(method));
+                updateCraftingConfiguration(method);
+                log.info("Selected crafting method: {}", method);
+            });
+            methodButtonPanel.add(methodButton);
+        }
+
+        if (currentConfig.getCraftingMethod() != null) {
+            Component[] components = methodButtonPanel.getComponents();
+            for (int i = 0; i < methods.length && i < components.length; i++) {
+                if (methods[i] == currentConfig.getCraftingMethod() && components[i] instanceof JButton) {
+                    selectMethodButton((JButton) components[i]);
+                    updateCraftingConfiguration(methods[i]);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void updateCraftingConfiguration(CraftingMethod method) {
+        removeConfigComponents();
+        String[] recipes = CraftingProcessor.getRecipeNames(method);
+        if (recipes.length == 0) {
+            return;
+        }
+        String selected = currentConfig.getCraftingRecipe();
+        if (selected == null || !java.util.Arrays.asList(recipes).contains(selected)) {
+            selected = recipes[0];
+            currentConfig.setCraftingRecipe(selected);
+        }
+
+        JComboBox<String> recipeDropdown = new JComboBox<>(new DefaultComboBoxModel<>(recipes));
+        recipeDropdown.setSelectedItem(selected);
+        recipeDropdown.addActionListener(e -> currentConfig.setCraftingRecipe(
+                (String) recipeDropdown.getSelectedItem()));
+
+        JPanel recipePanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+        recipePanel.add(recipeDropdown);
+        configurationPanel.add(recipePanel);
+        configurationPanel.revalidate();
+        configurationPanel.repaint();
+    }
+
+    private void createCookingMethodButtons() {
+        CookingMethod[] methods = CookingMethod.values();
+        setupMethodButtonGrid(methodButtonPanel, methods.length);
+
+        for (CookingMethod method : methods) {
+            JButton methodButton = createMethodButton(method.getDisplayName());
+            methodButton.addActionListener(e -> {
+                selectMethodButton(methodButton);
+                currentConfig.setCookingMethod(method);
+                currentConfig.setCookingRecipe(CookingProcessor.getDefaultRecipe(method));
+                updateCookingConfiguration(method);
+                log.info("Selected cooking method: {}", method);
+            });
+            methodButtonPanel.add(methodButton);
+        }
+
+        if (currentConfig.getCookingMethod() != null) {
+            Component[] components = methodButtonPanel.getComponents();
+            for (int i = 0; i < methods.length && i < components.length; i++) {
+                if (methods[i] == currentConfig.getCookingMethod() && components[i] instanceof JButton) {
+                    selectMethodButton((JButton) components[i]);
+                    updateCookingConfiguration(methods[i]);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void updateCookingConfiguration(CookingMethod method) {
+        removeConfigComponents();
+        String[] recipes = CookingProcessor.getRecipeNames(method);
+        if (recipes.length == 0) {
+            return;
+        }
+        String selected = currentConfig.getCookingRecipe();
+        if (selected == null || !java.util.Arrays.asList(recipes).contains(selected)) {
+            selected = recipes[0];
+            currentConfig.setCookingRecipe(selected);
+        }
+
+        JComboBox<String> recipeDropdown = new JComboBox<>(new DefaultComboBoxModel<>(recipes));
+        recipeDropdown.setSelectedItem(selected);
+        recipeDropdown.addActionListener(e -> currentConfig.setCookingRecipe(
+                (String) recipeDropdown.getSelectedItem()));
+
+        JPanel recipePanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+        recipePanel.add(recipeDropdown);
+        configurationPanel.add(recipePanel);
+        configurationPanel.revalidate();
+        configurationPanel.repaint();
+    }
+
     private void removeConfigComponents() {
         configurationPanel.removeAll();
     }
@@ -563,15 +777,6 @@ public class AutoBankStanderPanel extends PluginPanel {
             statusLabel.setText("Stopped");
             log.info("Script stopped from panel");
         } else {
-            // only allow starting for implemented skills
-            if (selectedBankSkill != BankStandingSkill.MAGIC && 
-                selectedBankSkill != BankStandingSkill.HERBLORE && 
-                selectedBankSkill != BankStandingSkill.FLETCHING) {
-                log.info("Skill {} not yet implemented", selectedBankSkill);
-                statusLabel.setText("Skill not yet implemented");
-                return;
-            }
-            
             log.info("=== USER CLICKED START BUTTON ===");
             log.info("Selected skill: {}", selectedBankSkill);
             log.info("Current config skill: {}", currentConfig.getSkill());

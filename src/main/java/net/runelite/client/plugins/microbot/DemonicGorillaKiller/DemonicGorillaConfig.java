@@ -79,6 +79,18 @@ public interface DemonicGorillaConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "lootRadius",
+            name = "Loot radius",
+            description = "Maximum distance (in tiles) from which dropped items are looted",
+            section = lootingSection,
+            position = 1
+    )
+    @Range(min = 1, max = 30)
+    default int lootRadius() {
+        return 15;
+    }
+
+    @ConfigItem(
             keyName = "scatterAshes",
             name = "Scatter Ashes",
             description = "Scatter Malicious ashes upon looting",
@@ -223,6 +235,34 @@ public interface DemonicGorillaConfig extends Config {
     )
     default InventorySetup meleeGear() {
         return null;
+    }
+
+    @ConfigItem(
+            keyName = "autoGearSwitch",
+            name = "Auto gear switch",
+            description = "Automatically switch to a counter style whenever the gorilla changes its protection prayer",
+            section = gearSettingsSection,
+            position = 7
+    )
+    default boolean autoGearSwitch() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "preferredCounterStyle",
+            name = "Preferred counter style",
+            description = "Style to use when two styles can counter the gorilla's protection. Falls back to the style that is already equipped when the preferred style is not enabled.",
+            section = gearSettingsSection,
+            position = 8
+    )
+    default CounterStyle preferredCounterStyle() {
+        return CounterStyle.MELEE;
+    }
+
+    enum CounterStyle {
+        MELEE,
+        RANGED,
+        MAGIC
     }
 }
 

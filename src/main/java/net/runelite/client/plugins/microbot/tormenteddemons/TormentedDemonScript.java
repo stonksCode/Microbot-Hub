@@ -1,12 +1,20 @@
 package net.runelite.client.plugins.microbot.tormenteddemons;
 
+import net.runelite.api.Actor;
 import net.runelite.api.EquipmentInventorySlot;
+import net.runelite.api.GameState;
 import net.runelite.api.HeadIcon;
+import net.runelite.api.Hitsplat;
+import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.coords.WorldArea;
+import net.runelite.api.WorldView;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.widgets.ComponentID;
+import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetInfo;
 import net.runelite.client.plugins.grounditems.GroundItem;
 import net.runelite.client.plugins.microbot.Microbot;
@@ -28,19 +36,25 @@ import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Spellbook;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Spells;
 import net.runelite.client.plugins.microbot.util.magic.thralls.Rs2Thrall;
+import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
+import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
 import net.runelite.client.plugins.microbot.util.misc.SpecialAttackWeaponEnum;
+import net.runelite.client.plugins.microbot.util.misc.Rs2Potion;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2Prayer;
 import net.runelite.client.plugins.microbot.util.prayer.Rs2PrayerEnum;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
+import java.awt.Rectangle;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
@@ -49,6 +63,15 @@ import java.util.stream.Collectors;
 public class TormentedDemonScript extends Script {
 
     public static int killCount = 0;
+    /** Duration of the most recent kill in milliseconds, 0 when none has been recorded yet. */
+    public static long lastKillTimeMs = 0;
+    private static long totalKillTimeMs = 0;
+    private static int timedKills = 0;
+    private static int tripKills = 0;
+    private static long tripLootValue = 0;
+    // A fight that lasts longer than this was almost certainly waiting on a respawn or a walk,
+    // not a real kill, so it is kept out of the averages.
+    private static final long MAX_TRACKED_KILL_TIME_MS = 15 * 60 * 1000L;
     private Rs2PrayerEnum currentOffensivePrayer = null;
     private HeadIcon currentOverheadIcon = null;
     private CombatStyle currentCombatStyle = null;
@@ -64,18 +87,99 @@ public class TormentedDemonScript extends Script {
     private String lastSpecialAttackDebug = "";
     private boolean lootAttempted = false;
     private boolean warnedArceuus = false;
+    private boolean inventoryFullStopIssued = false;
+    private long lastDemonicOfferingAt = 0;
     private String lastChatMessage = "";
     public volatile long dodgeUntil = 0;
+    /**
+     * Set by the plugin while a firebomb blast is still active. Combat may keep attacking from
+     * where it stands, but it must not start a walk toward the demon during this window because
+     * the client's auto-walk does not know about the bomb tiles.
+     */
+    public volatile long bombWalkLockUntil = 0;
+    private long fightStartTime = 0;
+    private volatile long lastFirebombTime = 0;
+    private volatile boolean punishGearArmed = false;
+    private volatile long lastPlayerHitOnTargetAt = 0;
+    private long punishSwappedAt = 0;
+    private boolean inPunishPhase = false;
+    private boolean inDefenselessPhase = false;
+    private String lastGearBeforeSwap = null;
+    private List<String> lastGearList = null;
+    private boolean swappedForPunish = false;
+    private boolean swappedForSpec = false;
+    private boolean lastOffensiveGateEngaged = false;
+    private long offensivePrayerKeepUntil = 0;
+    private long lastOffensivePrayerAttemptAt = 0;
+    /** Config of the currently running script, used by helpers that are called without it. */
+    private TormentedDemonConfig activeConfig;
 
     private static final WorldPoint SAFE_LOCATION = new WorldPoint(3150, 3634, 0);
+    private static final WorldPoint GUTHIXIAN_TEMPLE_LOCATION = new WorldPoint(4062, 4558, 0);
     private static final int FEROX_POOL_ID = 39651;
+    // Time allowed for the emergency teleport to be interrupted by the demon before shutdown.
+    private static final int EMERGENCY_TELEPORT_COMBAT_WAIT_MS = 8_000;
+    // How many times one loot attempt may free a slot and run the loot engine again.
+    private static final int LOOT_SPACE_PASSES = 3;
+    // Demonic Offering has a 9 tick (5.4 s) cooldown shared by all offering spells.
+    private static final long DEMONIC_OFFERING_COOLDOWN_MS = 5_400L;
+    private static final Set<String> DEMONIC_ASHES_NAMES = new HashSet<>(Arrays.asList(
+            "fiendish ashes", "vile ashes", "malicious ashes", "abyssal ashes", "infernal ashes"));
+    // Order used when the configured emergency teleport is unavailable: bank-adjacent teleports
+    // first, then the temple scroll, which at least leaves the cave.
+    private static final List<TormentedDemonConfig.EmergencyTeleportMethod> EMERGENCY_TELEPORT_FALLBACKS =
+            Arrays.asList(
+                    TormentedDemonConfig.EmergencyTeleportMethod.RING_OF_DUELING,
+                    TormentedDemonConfig.EmergencyTeleportMethod.AMULET_OF_GLORY,
+                    TormentedDemonConfig.EmergencyTeleportMethod.RING_OF_WEALTH,
+                    TormentedDemonConfig.EmergencyTeleportMethod.ROYAL_SEED_POD,
+                    TormentedDemonConfig.EmergencyTeleportMethod.VARROCK_TAB,
+                    TormentedDemonConfig.EmergencyTeleportMethod.LUMBRIDGE_TAB,
+                    TormentedDemonConfig.EmergencyTeleportMethod.FALADOR_TAB,
+                    TormentedDemonConfig.EmergencyTeleportMethod.SKILLS_NECKLACE,
+                    TormentedDemonConfig.EmergencyTeleportMethod.COMBAT_BRACELET,
+                    TormentedDemonConfig.EmergencyTeleportMethod.CAMELOT_TAB,
+                    TormentedDemonConfig.EmergencyTeleportMethod.WATCHTOWER_TAB,
+                    TormentedDemonConfig.EmergencyTeleportMethod.ARDOUGNE_TAB,
+                    TormentedDemonConfig.EmergencyTeleportMethod.HOUSE_TAB,
+                    TormentedDemonConfig.EmergencyTeleportMethod.GUTHIXIAN_TEMPLE);
     private static final long MARK_REFRESH_MARGIN_MS = 10_000L;
     private static final long MARK_RETRY_MS = 5_000L;
     private static final long THRALL_RETRY_MS = 3_000L;
     private static final long WEAPON_CHECK_RETRY_MS = 2_000L;
     private static final long SPECIAL_ATTACK_RETRY_MS = 600L;
+    // Keep the offensive prayer up across short range/LOS dips (dodging, walking back) so it does
+    // not flicker off and on every tick, but still drop it during looting and travel.
+    private static final long OFFENSIVE_PRAYER_KEEP_MS = 4_000L;
+    // A failed activation must not be retried every tick; each attempt can take over a second.
+    private static final long OFFENSIVE_PRAYER_RETRY_MS = 1_500L;
+    // equipGear already blocks until the gear is verified worn, so the grace only has to cover
+    // the client/server round trip for the weapon change before the style/spec checks run again.
+    private static final long GEAR_SWITCH_GRACE_MS = 350L;
+    private static final long GEAR_RESTORE_GRACE_MS = 250L;
+    private static final long DEFENSELESS_DELAY_MS = 18_000L;
+    private static final long PUNISH_MAX_HOLD_MS = 8_000L;
+    // The punish window only opens once the bombs have landed and the dodge is over. The fire
+    // shield stays down until the next attack, so there is no need to swap while still dodging.
+    private static final long PUNISH_PHASE_DELAY_MS = 1_800L;
     private static final int DEFAULT_MIN_STACK_EXCLUSIVE_ARROWS = 9;
     private static final int DEFAULT_MIN_STACK_EXCLUSIVE_RUNES = 1;
+
+    /**
+     * Every potion name the client's drink helper accepts. Names are normalized (lower case, dose
+     * suffix removed) so "Prayer potion(1)" and "Prayer potion(4)" both match.
+     */
+    private static final Set<String> PRAYER_SUPPLY_NAMES;
+
+    static {
+        Set<String> names = new HashSet<>();
+        for (String name : Rs2Potion.getPrayerPotionsVariants()) {
+            names.add(normalizePotionName(name));
+        }
+        names.add(normalizePotionName(Rs2Potion.getPrayerRegenerationPotion()));
+        names.add(normalizePotionName("Blighted super restore"));
+        PRAYER_SUPPLY_NAMES = Collections.unmodifiableSet(names);
+    }
 
     private enum State {BANKING, RETREAT, TRAVEL_TO_TORMENTED, FIGHTING}
 
@@ -92,6 +196,7 @@ public class TormentedDemonScript extends Script {
     private enum CombatStyle {MELEE, RANGE, MAGIC}
 
     public boolean run(TormentedDemonConfig config) {
+        activeConfig = config;
         if (config.mode() == TormentedDemonConfig.MODE.FULL_AUTO) {
             BOT_STATUS = State.BANKING;
         } else if (config.mode() == TormentedDemonConfig.MODE.COMBAT_ONLY) {
@@ -101,16 +206,34 @@ public class TormentedDemonScript extends Script {
         bankingStep = BankingStep.DRINK;
         travelStep = TravelStep.LOCATION_ONE;
         dodgeUntil = 0;
+        bombWalkLockUntil = 0;
+        lastFirebombTime = 0;
+        punishGearArmed = false;
+        lastPlayerHitOnTargetAt = 0;
+        punishSwappedAt = 0;
+        inPunishPhase = false;
+        inDefenselessPhase = false;
+        swappedForPunish = false;
+        swappedForSpec = false;
         lastWeaponCheckAt = 0;
         lastSpecialAttackAttemptAt = 0;
         specialAttackEnabledByPlugin = false;
         lastSpecialAttackDebug = "";
         Microbot.enableAutoRunOn = false;
+        resetTripStats();
 
         mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> {
             try {
                 if (!Microbot.isLoggedIn() || !super.run()) return;
-                if (System.currentTimeMillis() < dodgeUntil) return;
+                if (System.currentTimeMillis() < dodgeUntil) {
+                    // The dodge loop owns movement while a firebomb is active. Keep phase handling
+                    // (prayer-appropriate punish gear / spec gear) running so the swap lands inside
+                    // the shield-down window instead of being skipped and reverted.
+                    if (BOT_STATUS == State.FIGHTING) {
+                        handlePhases(config);
+                    }
+                    return;
+                }
 
                 switch (BOT_STATUS) {
                     case BANKING:
@@ -137,7 +260,7 @@ public class TormentedDemonScript extends Script {
         if (Rs2Bank.isOpen()) {
             Rs2Bank.closeBank();
         }
-        WorldPoint targetLocationOne = new WorldPoint(4062, 4558, 0);
+        WorldPoint targetLocationOne = GUTHIXIAN_TEMPLE_LOCATION;
         WorldPoint targetFinalLocation = new WorldPoint(4073, 4432, 0);
 
         switch (travelStep) {
@@ -147,14 +270,11 @@ public class TormentedDemonScript extends Script {
                     break;
                 }
                 Microbot.status = "Teleporting to Guthixian temple...";
-                if (Rs2Inventory.interact("Guthixian temple teleport", "Teleport")) {
-                    Rs2Player.waitForAnimation();
-                    sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
-                    if (sleepUntil(() -> isWithin(targetLocationOne, 20), 12000)) {
-                        travelStep = TravelStep.CLIMB_FIRST_STAIRS;
-                    } else {
-                        logOnceToChat("Guthixian temple teleport did not complete; retrying.");
-                    }
+                if (Rs2Inventory.hasItem("Guthixian temple teleport") && !teleportToGuthixianTemple()) {
+                    logOnceToChat("Guthixian temple teleport did not complete; retrying.");
+                }
+                if (isWithin(targetLocationOne, 20)) {
+                    travelStep = TravelStep.CLIMB_FIRST_STAIRS;
                 }
                 break;
 
@@ -239,6 +359,16 @@ public class TormentedDemonScript extends Script {
                     break;
                 }
                 Rs2Bank.depositAll();
+                if (config.stopWhenOutOfSupplies()) {
+                    if (!bankHasHealingSupply()) {
+                        stopForSupplies(config, "No food left in the bank", false);
+                        return;
+                    }
+                    if (usesPrayer(config) && !bankHasPrayerSupply()) {
+                        stopForSupplies(config, "No prayer potions left in the bank", false);
+                        return;
+                    }
+                }
                 bankingStep = BankingStep.LOAD_INVENTORY;
                 break;
             }
@@ -250,12 +380,32 @@ public class TormentedDemonScript extends Script {
                 boolean inventoryLoaded = inventorySetup.loadInventory();
 
                 if (equipmentLoaded && inventoryLoaded) {
+                    // The setup loader tolerates a partial restock when the bank is short, so verify
+                    // the loaded inventory actually contains something the bot can heal/restore with.
+                    if (config.stopWhenOutOfSupplies()) {
+                        if (!hasHealingSupply()) {
+                            stopForSupplies(config, "No food left after restocking", false);
+                            return;
+                        }
+                        if (usesPrayer(config) && !hasPrayerSupply()) {
+                            stopForSupplies(config, "No prayer potions left after restocking", false);
+                            return;
+                        }
+                    }
                     Rs2Bank.closeBank();
                     bankingStep = BankingStep.DRINK;
+                    resetTripStats();
                     BOT_STATUS = State.TRAVEL_TO_TORMENTED;
                 } else {
-                    logOnceToChat("Failed to load inventory/equipment setup 'tormented'; stopping.");
-                    Microbot.stopPlugin(TormentedDemonPlugin.class);
+                    String reason;
+                    if (!hasHealingSupply()) {
+                        reason = "No food left to restock with";
+                    } else if (usesPrayer(config) && !hasPrayerSupply()) {
+                        reason = "No prayer potions left to restock with";
+                    } else {
+                        reason = "Failed to load inventory/equipment setup 'tormented'";
+                    }
+                    stopForSupplies(config, reason, false);
                 }
                 break;
             }
@@ -335,14 +485,66 @@ public class TormentedDemonScript extends Script {
         return false;
     }
 
+    /**
+     * Clicks the Guthixian temple teleport and waits for the destination. Used both for travelling
+     * to the demons and as an emergency exit from the cave.
+     */
+    private boolean teleportToGuthixianTemple() {
+        if (!Rs2Inventory.interact("Guthixian temple teleport", "Teleport")) {
+            return false;
+        }
+        Rs2Player.waitForAnimation();
+        sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+        return sleepUntil(() -> isWithin(GUTHIXIAN_TEMPLE_LOCATION, 20), 12000);
+    }
+
+    public void onFirebombTracked() {
+        long now = System.currentTimeMillis();
+        // One special launches two bombs; only arm the punish phase once for that special.
+        if (now - lastFirebombTime > 5_000L) {
+            lastFirebombTime = now;
+            punishGearArmed = true;
+            lastPlayerHitOnTargetAt = 0;
+        }
+    }
+
+    /**
+     * Called by the plugin for every hitsplat in the game. Only the local player's hits on the
+     * current target are recorded: that is the "first hit" that consumes the shield-down punish
+     * window. Player animation time is not used because walking/running also animates.
+     */
+    public void onTargetHitsplat(Actor actor, Hitsplat hitsplat) {
+        if (actor == null || hitsplat == null || !hitsplat.isMine()) {
+            return;
+        }
+        Rs2NpcModel target = currentTarget;
+        if (target == null || actor != target.getNpc()) {
+            return;
+        }
+        lastPlayerHitOnTargetAt = System.currentTimeMillis();
+    }
+
+    public void clearFirebombTracking() {
+        lastFirebombTime = 0;
+        punishGearArmed = false;
+        lastPlayerHitOnTargetAt = 0;
+        inPunishPhase = false;
+        inDefenselessPhase = false;
+    }
+
     private void handleFighting(TormentedDemonConfig config) {
         if (currentTarget == null || isTargetDead(currentTarget)) {
             releasePluginSpecialAttack(config);
-            disableAllPrayers();
+            // Keep protection reactive while a demon is still attacking during the loot, but stop
+            // the offensive prayer immediately; the plugin clears stale protection prayers when
+            // nothing is targeting the player.
+            disableOffensivePrayer();
+            restoreGearAfterPhases(config);
 
             if (!lootAttempted) {
                 if (currentTarget != null && isTargetDead(currentTarget)) {
                     killCount++;
+                    recordKillTime(fightStartTime);
                     if (config.lootDelay() > 0) {
                         sleep(config.lootDelay());
                     }
@@ -351,10 +553,26 @@ public class TormentedDemonScript extends Script {
                 lootAttempted = true;
             }
 
+            // Checked after looting and before targeting the next demon: a finished fight is the
+            // natural place to leave with the last hit's loot instead of starting another kill.
+            if (handleSupplySafety(config)) {
+                return;
+            }
+
             currentTarget = findNewTarget();
             if (currentTarget == null) {
                 currentTargetIndex = -1;
                 logOnceToChat("No Tormented Demon found; waiting...");
+                fightStartTime = 0;
+                lastFirebombTime = 0;
+                punishGearArmed = false;
+                lastPlayerHitOnTargetAt = 0;
+                punishSwappedAt = 0;
+                inPunishPhase = false;
+                inDefenselessPhase = false;
+                swappedForPunish = false;
+                swappedForSpec = false;
+                restoreGearAfterPhases(config);
                 return;
             }
 
@@ -363,14 +581,27 @@ public class TormentedDemonScript extends Script {
             currentCombatStyle = null;
             lastWeaponCheckAt = 0;
             lootAttempted = false;
+            fightStartTime = System.currentTimeMillis();
+            lastFirebombTime = 0;
+            punishGearArmed = false;
+            lastPlayerHitOnTargetAt = 0;
+            punishSwappedAt = 0;
+            inPunishPhase = false;
+            inDefenselessPhase = false;
+        }
+
+        if (handleSupplySafety(config)) {
+            return;
         }
 
         HeadIcon overheadIcon = getHeadIcon(currentTarget);
         if (overheadIcon != null && overheadIcon != currentOverheadIcon) {
             currentOverheadIcon = overheadIcon;
-            CombatStyle newStyle = config.autoGearSwitch() ? switchGear(config, overheadIcon) : detectStyle(config);
-            updateCombatStyle(newStyle);
-        } else if (System.currentTimeMillis() >= gearSwitchGraceUntil) {
+            if (!swappedForPunish && !swappedForSpec) {
+                CombatStyle newStyle = config.autoGearSwitch() ? switchGear(config, overheadIcon) : detectStyle(config);
+                updateCombatStyle(newStyle);
+            }
+        } else if (System.currentTimeMillis() >= gearSwitchGraceUntil && !swappedForPunish && !swappedForSpec) {
             updateCombatStyle(detectStyle(config));
             HeadIcon activeIcon = overheadIcon != null ? overheadIcon : currentOverheadIcon;
             updateCombatStyle(ensureCorrectWeapon(config, activeIcon));
@@ -378,18 +609,42 @@ public class TormentedDemonScript extends Script {
 
         evaluateAndConsumePotions(config);
 
-        if (config.mode() == TormentedDemonConfig.MODE.FULL_AUTO && shouldRetreat(config)) {
-            currentTarget = null;
-            currentTargetIndex = -1;
-            currentOverheadIcon = null;
-            currentCombatStyle = null;
-            BOT_STATUS = State.RETREAT;
-            return;
-        }
+        handlePhases(config);
 
         Rs2Player.eatAt(config.minEatPercent());
         if (config.enableDefensivePrayer() || config.enableOffensivePrayer()) {
             Rs2Player.drinkPrayerPotionAt(prayerThreshold(config));
+        }
+
+        // Evaluated before the magic utility and the attack click: casting Mark of Darkness or
+        // waiting on an attack click used to return early and leave the offensive prayer off for
+        // that whole tick, which showed up as "never turns on".
+        if (config.enableOffensivePrayer()) {
+            // Only boost while the target can actually be hit. Walking to the next demon used to
+            // keep the prayer burning for the whole trip, which adds up over a long session.
+            // The keep-alive window stops it flickering off during the firebomb dodge or a single
+            // out-of-range tick and then being switched straight back on.
+            long now = System.currentTimeMillis();
+            boolean engaged = currentCombatStyle != null && isEngagedWithTarget();
+            if (engaged) {
+                offensivePrayerKeepUntil = now + OFFENSIVE_PRAYER_KEEP_MS;
+            }
+            boolean keep = engaged || now < offensivePrayerKeepUntil || now < dodgeUntil;
+            if (config.debugPrayer() && keep != lastOffensiveGateEngaged) {
+                lastOffensiveGateEngaged = keep;
+                Microbot.log("[TD prayer] offensive gate " + (keep ? "open" : "closed")
+                        + ": distance=" + distanceToTarget()
+                        + " range=" + attackRange()
+                        + " style=" + currentCombatStyle
+                        + " engaged=" + engaged);
+            }
+            if (keep) {
+                activateOffensivePrayer(config, currentCombatStyle);
+            } else {
+                disableOffensivePrayer();
+            }
+        } else {
+            disableOffensivePrayer();
         }
 
         if (currentCombatStyle == CombatStyle.MAGIC && handleMagicUtility(config)) {
@@ -400,13 +655,17 @@ public class TormentedDemonScript extends Script {
             return;
         }
 
-        if (config.useSpecialAttack()) {
+        if (config.useSpecialAttack() || config.useSpecialAttackGear()) {
+            // "Use Special Attack Gear" implies using the special attack itself; otherwise the
+            // gear would be swapped in and the orb would never be enabled.
             handleSpecialAttack(config);
         } else {
             releasePluginSpecialAttack(config);
         }
 
-        if (getInteractingTargetIndex() != currentTargetIndex) {
+        boolean walkingToTarget = getInteractingTargetIndex() != currentTargetIndex;
+        boolean waitingForFire = walkingToTarget && mustNotWalkToTarget();
+        if (walkingToTarget && !waitingForFire) {
             if (!currentTarget.click("attack")) {
                 logOnceToChat("Attack failed for target.");
                 currentTarget = null;
@@ -414,20 +673,114 @@ public class TormentedDemonScript extends Script {
                 currentOverheadIcon = null;
                 currentCombatStyle = null;
                 lastWeaponCheckAt = 0;
+                disableOffensivePrayer();
+                restoreGearAfterPhases(config);
                 return;
             }
 
             Rs2Player.waitForAnimation();
             sleepUntil(() -> getInteractingTargetIndex() == currentTargetIndex, 3000);
+        } else if (waitingForFire && config.debugDodge()) {
+            // Not in range yet: clicking attack would make the client auto-walk, and that walk
+            // does not avoid the bomb blasts. Hold the click until the fire burns out.
+            logOnceToChat("Holding attack until the firebombs burn out before walking back.");
         }
+    }
 
-        if (config.enableOffensivePrayer()) {
-            if (currentCombatStyle != null) {
-                activateOffensivePrayer(config, currentCombatStyle);
-            }
-        } else {
-            disableOffensivePrayer();
+    /**
+     * Attack range for the equipped weapon. {@link Rs2Combat#getAttackRange(boolean, boolean)}
+     * resolves the weapon-style enum, and that lookup intermittently fails right after an
+     * equipment change ("weaponStyleStructs is null"). The exception used to abort the whole
+     * combat tick, which meant the offensive prayer gate was never evaluated while a magic
+     * weapon was equipped. Fall back to the range typical for the detected style instead.
+     */
+    private int attackRange() {
+        try {
+            return Math.max(1, Rs2Combat.getAttackRange(true, false));
+        } catch (RuntimeException e) {
+            return currentCombatStyle == CombatStyle.MAGIC || currentCombatStyle == CombatStyle.RANGE ? 10 : 1;
         }
+    }
+
+    /**
+     * True when the current target is close enough to be attacked right now, so an offensive
+     * prayer would actually apply to a hit. Merely interacting with a demon does not count: the
+     * client keeps that interaction while auto-walking towards it.
+     *
+     * <p>Distance and line of sight are measured against the NPC's whole area, not its base
+     * tile. Tormented Demons occupy several tiles, so a base-tile check reports "out of range"
+     * while the player is already standing next to the body and attacking.</p>
+     */
+    private boolean isEngagedWithTarget() {
+        if (currentTarget == null || isTargetDead(currentTarget)) {
+            return false;
+        }
+        int attackRange = attackRange();
+        if (distanceToTarget() > attackRange) {
+            return false;
+        }
+        return attackRange <= 1 || targetHasLineOfSight();
+    }
+
+    /**
+     * Chebyshev distance from the player to the closest tile of the target's body, or
+     * {@link Integer#MAX_VALUE} when either location is unavailable.
+     */
+    private int distanceToTarget() {
+        if (currentTarget == null) {
+            return Integer.MAX_VALUE;
+        }
+        WorldPoint playerLocation = Rs2Player.getWorldLocation();
+        NPC npc = currentTarget.getNpc();
+        if (playerLocation == null || npc == null) {
+            return Integer.MAX_VALUE;
+        }
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            WorldArea targetArea = npc.getWorldArea();
+            if (targetArea == null || targetArea.getPlane() != playerLocation.getPlane()) {
+                return Integer.MAX_VALUE;
+            }
+            return targetArea.distanceTo(playerLocation);
+        }).orElse(Integer.MAX_VALUE);
+    }
+
+    private boolean targetHasLineOfSight() {
+        if (currentTarget == null) {
+            return false;
+        }
+        WorldPoint playerLocation = Rs2Player.getWorldLocation();
+        NPC npc = currentTarget.getNpc();
+        if (playerLocation == null || npc == null) {
+            return false;
+        }
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            WorldArea targetArea = npc.getWorldArea();
+            WorldView worldView = Microbot.getClient().getTopLevelWorldView();
+            if (targetArea == null || worldView == null
+                    || targetArea.getPlane() != playerLocation.getPlane()) {
+                return false;
+            }
+            return targetArea.hasLineOfSightTo(worldView, playerLocation);
+        }).orElse(false);
+    }
+
+    /**
+     * True when a tracked firebomb is still burning and the player is not already in attack
+     * range of the target. In that situation clicking the demon would start the client's
+     * auto-walk, which knows nothing about bomb tiles and can path straight through the blast.
+     * Waiting out the fire costs at most a couple of seconds and the punish window is measured
+     * from the bomb impact, so the shield-down hit is still available afterwards.
+     */
+    private boolean mustNotWalkToTarget() {
+        if (System.currentTimeMillis() >= bombWalkLockUntil || currentTarget == null) {
+            return false;
+        }
+        int attackRange = attackRange();
+        if (distanceToTarget() > attackRange) {
+            return true;
+        }
+        // In range but without line of sight the client would still walk to get a view.
+        return attackRange > 1 && !targetHasLineOfSight();
     }
 
     private void updateCombatStyle(CombatStyle newStyle) {
@@ -436,7 +789,12 @@ public class TormentedDemonScript extends Script {
         }
         currentCombatStyle = newStyle;
         logOnceToChat("Combat style detected: " + newStyle + ".");
-        disableOffensivePrayer();
+        if (currentOffensivePrayer != null) {
+            disableOffensivePrayer();
+            // Let the new style's prayer come up on this tick instead of waiting out the retry
+            // cooldown from the previous activation.
+            lastOffensivePrayerAttemptAt = 0;
+        }
     }
 
     private boolean handleMagicUtility(TormentedDemonConfig config) {
@@ -575,7 +933,7 @@ public class TormentedDemonScript extends Script {
             logOnceToChat("Switching gear to " + chosen + ".");
             equipGear(gear);
             gearChanged = true;
-            gearSwitchGraceUntil = System.currentTimeMillis() + 1500L;
+            gearSwitchGraceUntil = System.currentTimeMillis() + GEAR_SWITCH_GRACE_MS;
         }
 
         if (!gearChanged) {
@@ -600,6 +958,11 @@ public class TormentedDemonScript extends Script {
         if (!config.verifyWeapon() || !config.autoGearSwitch() || combatNpcHeadIcon == null) {
             return null;
         }
+        // Punish/spec gear is deliberately outside the normal prayer counter sets. Do not let the
+        // weapon verifier revert it while a phase swap is active.
+        if (swappedForPunish || swappedForSpec) {
+            return null;
+        }
         if (System.currentTimeMillis() < gearSwitchGraceUntil) {
             return null;
         }
@@ -610,8 +973,16 @@ public class TormentedDemonScript extends Script {
         }
 
         CombatStyle actual = detectAttackStyle(config);
+        if (actual == null) {
+            // The weapon style cannot be read reliably right now (equipment change still in
+            // flight, or an unrecognised weapon). Re-equipping here produced the observed loop of
+            // "Weapon check failed ... (unknown) does not counter MAGIC protection" followed by
+            // repeated multi-slot equips, so wait for the next check instead.
+            return null;
+        }
+
         String weaponName = getEquippedWeaponName();
-        boolean styleCorrect = actual != null && candidates.contains(actual);
+        boolean styleCorrect = candidates.contains(actual);
         boolean gearCorrect = styleCorrect && isGearEquipped(gearForStyle(config, actual));
 
         if (styleCorrect && gearCorrect) {
@@ -625,8 +996,7 @@ public class TormentedDemonScript extends Script {
         lastWeaponCheckAt = now;
 
         String equipped = weaponName != null ? weaponName : "unknown weapon";
-        String current = actual != null ? actual.name() : "unknown";
-        logOnceToChat("Weapon check failed: " + equipped + " (" + current + ") does not counter "
+        logOnceToChat("Weapon check failed: " + equipped + " (" + actual + ") does not counter "
                 + combatNpcHeadIcon + " protection; correcting gear.");
         return switchGear(config, combatNpcHeadIcon);
     }
@@ -709,13 +1079,38 @@ public class TormentedDemonScript extends Script {
         }
 
         String weaponName = getEquippedWeaponName();
-        int requiredEnergy = getSpecialAttackEnergyRequired(weaponName);
         int energy = Rs2Combat.getSpecEnergy();
+        int thresholdEnergy = specThresholdEnergy(config);
+        int requiredEnergy = getSpecialAttackEnergyRequired(weaponName);
+
+        if (config.useSpecialAttackGear()) {
+            List<String> specGear = getSpecGearForOverhead(config, getHeadIcon(currentTarget));
+            boolean specAllowed = inDefenselessPhase
+                    && !specGear.isEmpty()
+                    && swappedForSpec
+                    && energy >= thresholdEnergy;
+            if (!specAllowed) {
+                // Special attack gear is only used during the defenseless phase, and only against
+                // overhead prayers that have a spec set configured. This stops a spec weapon (for
+                // example the Blue Moon spear without its full set) from being used incidentally.
+                if (swappedForSpec) {
+                    restoreGearAfterPhases(config);
+                }
+                releasePluginSpecialAttack(config);
+                debugSpecialAttack(config, "idle defenseless=" + inDefenselessPhase
+                        + " gear=" + (specGear.isEmpty() ? "none" : specGear.size() + " items")
+                        + " swapped=" + swappedForSpec
+                        + " energy=" + energy + " threshold=" + thresholdEnergy);
+                return;
+            }
+        }
 
         if (requiredEnergy < 0) {
-            releasePluginSpecialAttack(config);
-            debugSpecialAttack(config, "unsupported weapon=" + weaponName + " energy=" + energy);
-            return;
+            // Newer weapons are missing from SpecialAttackWeaponEnum. The user explicitly put them
+            // in a special attack gear box, so do not give up: use the configured threshold only.
+            requiredEnergy = 0;
+            debugSpecialAttack(config, "unlisted weapon=" + weaponName
+                    + "; relying on threshold only energy=" + energy);
         }
 
         if (energy < requiredEnergy) {
@@ -747,6 +1142,15 @@ public class TormentedDemonScript extends Script {
                     + " weapon=" + weaponName + " orbHidden="
                     + Rs2Widget.isHidden(WidgetInfo.MINIMAP_SPEC_ORB.getId() + 2));
         }
+    }
+
+    /**
+     * Special attack energy is stored on a 0-1000 scale (1000 = the full bar), while the config
+     * option is a percentage. Convert before comparing so the configured threshold is honoured.
+     */
+    private int specThresholdEnergy(TormentedDemonConfig config) {
+        int percent = Math.max(0, Math.min(100, config.specialAttackThreshold()));
+        return percent * 10;
     }
 
     private boolean enableSpecialAttack() {
@@ -796,9 +1200,9 @@ public class TormentedDemonScript extends Script {
     }
 
     private void debugSpecialAttack(TormentedDemonConfig config, String message) {
-        if (config == null || !config.debugPrayer()) {
-            return;
-        }
+        // Always logged (not gated by the debug toggles): the special attack phase is hard to
+        // diagnose from chat messages alone, and state transitions are deduplicated below so this
+        // produces one line per change rather than one per main-loop tick.
         String line = "[TD spec] " + message;
         if (line.equals(lastSpecialAttackDebug)) {
             return;
@@ -879,27 +1283,94 @@ public class TormentedDemonScript extends Script {
             return config.useMeleeStyle() ? CombatStyle.MELEE : null;
         }
 
+        String attackStyle = null;
         try {
-            String attackStyle = Rs2Combat.getWeaponAttackStyle();
-            if (attackStyle != null) {
-                String style = attackStyle.toLowerCase();
-                if (style.equals("magic") || style.equals("cast") || style.equals("casting")) {
-                    return config.useMagicStyle() ? CombatStyle.MAGIC : null;
-                }
-                if (style.equals("ranged") || style.equals("ranging") || style.equals("rapid")) {
-                    return config.useRangeStyle() ? CombatStyle.RANGE : null;
-                }
-                if (isMeleeAttackStyle(style)) {
-                    return config.useMeleeStyle() ? CombatStyle.MELEE : null;
-                }
-            }
+            attackStyle = Rs2Combat.getWeaponAttackStyle();
+        } catch (RuntimeException ignored) {
+            // COMBAT_WEAPON_CATEGORY is briefly 0 while an equipment switch is being applied, so
+            // the weapon-style enum lookup returns null. Fall through to the weapon-name check
+            // instead of reporting "unknown" and re-equipping the same gear in a loop.
+        }
 
+        CombatStyle detected = attackStyleFromName(attackStyle);
+        if (detected == null) {
+            detected = attackStyleFromWeapon(getEquippedWeaponName());
+        }
+        if (detected != null) {
+            return isStyleEnabled(config, detected) ? detected : null;
+        }
+
+        try {
             if (config.useMagicStyle() && Rs2Magic.getCurrentAutoCastSpell() != null) {
                 return CombatStyle.MAGIC;
             }
-        } catch (Exception ignored) {
+        } catch (RuntimeException ignored) {
         }
         return null;
+    }
+
+    private CombatStyle attackStyleFromName(String attackStyle) {
+        if (attackStyle == null) {
+            return null;
+        }
+        String style = attackStyle.toLowerCase(Locale.ROOT);
+        if (style.equals("magic") || style.equals("cast") || style.equals("casting")
+                || style.equals("spell") || style.equals("autocast")) {
+            return CombatStyle.MAGIC;
+        }
+        if (style.equals("ranged") || style.equals("ranging") || style.equals("rapid")
+                || style.contains("longrange") || style.contains("long range")) {
+            return CombatStyle.RANGE;
+        }
+        if (isMeleeAttackStyle(style)) {
+            return CombatStyle.MELEE;
+        }
+        return null;
+    }
+
+    /**
+     * Last-resort style detection for the window right after an equipment change, when the
+     * client's weapon-style enum cannot be read yet. The weapon name is enough to tell the three
+     * styles apart; anything unrecognised is treated as melee so the bot keeps attacking instead
+     * of looping through gear switches.
+     */
+    private CombatStyle attackStyleFromWeapon(String weaponName) {
+        if (weaponName == null) {
+            return null;
+        }
+        String name = weaponName.toLowerCase(Locale.ROOT);
+        if (name.contains("staff") || name.contains("wand") || name.contains("trident")
+                || name.contains("sceptre") || name.contains("scepter")
+                || name.contains("purging") || name.contains("nightmare")
+                || name.contains("kodai") || name.contains("sang")
+                || name.contains("shadow") || name.contains("ahrim")
+                || name.contains("ayak") || name.contains("tumeken")
+                || name.contains("volatile") || name.contains("eldritch")
+                || name.contains("harmonised") || name.contains("dawnbringer")) {
+            return CombatStyle.MAGIC;
+        }
+        if (name.contains("bow") || name.contains("blowpipe") || name.contains("crossbow")
+                || name.contains("ballista") || name.contains("javelin")
+                || name.contains("dart") || name.contains("knife")
+                || name.contains("chinchompa") || name.contains("atlatl")
+                || name.contains("scorching") || name.contains("twisted")
+                || name.contains("seercull")) {
+            return CombatStyle.RANGE;
+        }
+        return CombatStyle.MELEE;
+    }
+
+    private boolean isStyleEnabled(TormentedDemonConfig config, CombatStyle style) {
+        switch (style) {
+            case MELEE:
+                return config.useMeleeStyle();
+            case MAGIC:
+                return config.useMagicStyle();
+            case RANGE:
+                return config.useRangeStyle();
+            default:
+                return false;
+        }
     }
 
     private boolean isMeleeAttackStyle(String style) {
@@ -963,73 +1434,518 @@ public class TormentedDemonScript extends Script {
 
     private boolean isGearEquipped(List<String> gear) {
         if (gear == null || gear.isEmpty()) return false;
+        boolean any = false;
         for (String item : gear) {
-            if (!Rs2Equipment.isWearing(item)) return false;
+            if (item == null || item.trim().isEmpty()) continue;
+            any = true;
+            if (!Rs2Equipment.isWearing(item.trim())) return false;
         }
-        return true;
+        return any;
     }
 
     private void equipGear(List<String> gear) {
+        if (gear == null || gear.isEmpty()) return;
+
+        List<String> missing = new ArrayList<>();
         for (String item : gear) {
+            if (item == null || item.trim().isEmpty()) continue;
             if (Rs2Equipment.isWearing(item)) continue;
+            missing.add(item.trim());
+        }
+        if (missing.isEmpty()) return;
+
+        TormentedDemonConfig.GearSwitchMode mode = activeConfig != null
+                ? activeConfig.gearSwitchMode()
+                : TormentedDemonConfig.GearSwitchMode.NORMAL;
+        long start = System.currentTimeMillis();
+        sendEquipActions(missing, mode);
+
+        boolean equipped = sleepUntil(() -> isGearEquipped(gear), 900);
+        if (!equipped) {
+            // A click can land while the inventory is still updating (for example after eating or
+            // a previous switch). Retry only the slots that are still missing, then wait once more.
+            List<String> stillMissing = new ArrayList<>();
+            for (String item : missing) {
+                if (!Rs2Equipment.isWearing(item)) {
+                    stillMissing.add(item);
+                }
+            }
+            if (!stillMissing.isEmpty()) {
+                sendEquipActions(stillMissing, mode);
+                equipped = sleepUntil(() -> isGearEquipped(gear), 700);
+            } else {
+                equipped = true;
+            }
+        }
+
+        if (missing.size() > 1) {
+            String modeLabel = mode == TormentedDemonConfig.GearSwitchMode.INSTANT ? " (instant)"
+                    : mode == TormentedDemonConfig.GearSwitchMode.QUICK ? " (quick)" : "";
+            Microbot.log("[TD gear] " + (equipped ? "equipped " : "partially equipped ")
+                    + missing.size() + " slot(s) in " + (System.currentTimeMillis() - start) + "ms"
+                    + modeLabel);
+        }
+    }
+
+    /**
+     * Equips every item using the configured switch mode.
+     *
+     * <p>NORMAL fires the regular mouse-driven equip clicks back-to-back, but each of those calls
+     * still sleeps 50-100 ms internally and holds the button for 55-140 ms, so a five-slot swap
+     * spreads over several hundred milliseconds.</p>
+     *
+     * <p>QUICK uses the same mouse-driven path but through {@link Microbot#doInvokeQuick}, whose
+     * quick click holds the button for only 30-65 ms and settles for 10-25 ms. It still moves the
+     * mouse to every slot, so it looks like a fast human switch rather than a single-tick dump.</p>
+     *
+     * <p>INSTANT queues a raw inventory menu action for every slot inside one client-thread
+     * callback: no mouse movement and no per-slot sleep, so the whole switch is handled in the same
+     * game tick (the same result as spam-clicking the switch manually).</p>
+     *
+     * <p>If the inventory widget cannot be read, every mode falls back to the regular click path
+     * so the swap still happens.</p>
+     */
+    private void sendEquipActions(List<String> items, TormentedDemonConfig.GearSwitchMode mode) {
+        if (items == null || items.isEmpty()) return;
+
+        if (mode == TormentedDemonConfig.GearSwitchMode.INSTANT) {
+            if (equipBatchOnClientThread(items) > 0) {
+                return;
+            }
+        } else if (mode == TormentedDemonConfig.GearSwitchMode.QUICK) {
+            if (equipQuick(items) > 0) {
+                return;
+            }
+        }
+
+        for (String item : items) {
             if (!Rs2Inventory.wield(item)) {
                 logOnceToChat("Could not equip " + item + ".");
             }
-            sleep(50);
+        }
+    }
+
+    /**
+     * Reads the equip action for every item once, then fires a quick mouse click for each. The
+     * widget details have to be read on the client thread, but the clicks themselves are sent from
+     * this (script) thread so the normal mouse gesture and settle timing still apply.
+     */
+    private int equipQuick(List<String> items) {
+        List<EquipAction> actions = collectEquipActions(items);
+        int sent = 0;
+        for (EquipAction action : actions) {
+            if (action.bounds == null) {
+                continue;
+            }
+            NewMenuEntry entry = new NewMenuEntry()
+                    .option(action.option)
+                    .param0(action.slot)
+                    .param1(ComponentID.INVENTORY_CONTAINER)
+                    .type(action.actionIndex < 10 ? MenuAction.CC_OP : MenuAction.CC_OP_LOW_PRIORITY)
+                    .identifier(action.actionIndex + 1)
+                    .itemId(action.itemId)
+                    .target(action.itemName);
+            Microbot.doInvokeQuick(entry, action.bounds);
+            sent++;
+        }
+        return sent;
+    }
+
+    /** Reads the equip menu action and click box for each item on the client thread. */
+    private List<EquipAction> collectEquipActions(List<String> items) {
+        Rs2Tab.switchToInventoryTab();
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            List<EquipAction> actions = new ArrayList<>();
+            if (Microbot.getClient().getGameState() != GameState.LOGGED_IN) {
+                return actions;
+            }
+            Widget inventory = Microbot.getClient().getWidget(ComponentID.INVENTORY_CONTAINER);
+            if (inventory == null || inventory.isHidden()) {
+                return actions;
+            }
+
+            for (String name : items) {
+                Rs2ItemModel item = Rs2Inventory.get(name);
+                if (item == null) {
+                    continue;
+                }
+                Widget child = inventory.getChild(item.getSlot());
+                if (child == null || child.getItemId() != item.getId()) {
+                    continue;
+                }
+                String[] itemActions = child.getActions();
+                if (itemActions == null) {
+                    itemActions = item.getInventoryActions();
+                }
+                int actionIndex = findEquipActionIndex(itemActions);
+                if (actionIndex < 0) {
+                    continue;
+                }
+                actions.add(new EquipAction(item.getSlot(), item.getId(), actionIndex,
+                        itemActions[actionIndex], item.getName(), child.getBounds()));
+            }
+            return actions;
+        }).orElse(Collections.emptyList());
+    }
+
+    /**
+     * Client-thread only. Sends one equip menu action per item without any artificial delay and
+     * returns how many actions were queued. Mirrors the batching used by the action-bar style
+     * plugins, including the low-priority opcode for actions beyond the first ten.
+     */
+    private int equipBatchOnClientThread(List<String> items) {
+        Rs2Tab.switchToInventoryTab();
+        return Microbot.getClientThread().runOnClientThreadOptional(() -> {
+            if (Microbot.getClient().getGameState() != GameState.LOGGED_IN) {
+                return 0;
+            }
+            Widget inventory = Microbot.getClient().getWidget(ComponentID.INVENTORY_CONTAINER);
+            if (inventory == null || inventory.isHidden()) {
+                return 0;
+            }
+
+            int sent = 0;
+            for (String name : items) {
+                Rs2ItemModel item = Rs2Inventory.get(name);
+                if (item == null) {
+                    continue;
+                }
+                Widget child = inventory.getChild(item.getSlot());
+                if (child == null || child.getItemId() != item.getId()) {
+                    continue;
+                }
+                String[] actions = child.getActions();
+                if (actions == null) {
+                    actions = item.getInventoryActions();
+                }
+                int actionIndex = findEquipActionIndex(actions);
+                if (actionIndex < 0) {
+                    continue;
+                }
+                Microbot.getClient().menuAction(item.getSlot(), ComponentID.INVENTORY_CONTAINER,
+                        actionIndex < 10 ? MenuAction.CC_OP : MenuAction.CC_OP_LOW_PRIORITY,
+                        actionIndex + 1, item.getId(), actions[actionIndex], item.getName());
+                sent++;
+            }
+            return sent;
+        }).orElse(0);
+    }
+
+    private static int findEquipActionIndex(String[] actions) {
+        if (actions == null) {
+            return -1;
+        }
+        for (int i = 0; i < actions.length; i++) {
+            String action = actions[i];
+            if ("Wear".equalsIgnoreCase(action) || "Wield".equalsIgnoreCase(action)
+                    || "Equip".equalsIgnoreCase(action)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** One queued equip action: everything needed to build a menu entry without another lookup. */
+    private static final class EquipAction {
+        final int slot;
+        final int itemId;
+        final int actionIndex;
+        final String option;
+        final String itemName;
+        final Rectangle bounds;
+
+        EquipAction(int slot, int itemId, int actionIndex, String option, String itemName, Rectangle bounds) {
+            this.slot = slot;
+            this.itemId = itemId;
+            this.actionIndex = actionIndex;
+            this.option = option;
+            this.itemName = itemName;
+            this.bounds = bounds;
+        }
+    }
+
+    private void saveCurrentGear() {
+        if (lastGearList == null) {
+            lastGearList = new ArrayList<>();
+            try {
+                Rs2Equipment.items().forEach(item -> {
+                    if (item == null || item.getId() == -1 || item.getId() == 6512) return;
+                    String name = item.getName();
+                    if (name != null && !name.isEmpty()) {
+                        lastGearList.add(name);
+                    }
+                });
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void restoreGear(List<String> gear) {
+        if (gear == null || gear.isEmpty()) return;
+        equipGear(gear);
+    }
+
+    private void restoreGearAfterPhases(TormentedDemonConfig config) {
+        if (swappedForPunish || swappedForSpec) {
+            if (lastGearList != null && !lastGearList.isEmpty()) {
+                equipGear(lastGearList);
+            }
+            swappedForPunish = false;
+            swappedForSpec = false;
+            punishSwappedAt = 0;
+            lastGearList = null;
+            gearSwitchGraceUntil = System.currentTimeMillis() + GEAR_RESTORE_GRACE_MS;
+        }
+    }
+
+    private void handlePhases(TormentedDemonConfig config) {
+        if (currentTarget == null || isTargetDead(currentTarget)) {
+            restoreGearAfterPhases(config);
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (fightStartTime == 0) {
+            fightStartTime = now;
+        }
+
+        // Defenseless phase: the flames disappear 30 ticks (18 seconds) into the fight, and the
+        // 30-tick timer restarts after every fire bomb attack.
+        long defenselessSince = lastFirebombTime == 0 ? fightStartTime : lastFirebombTime;
+        inDefenselessPhase = now - defenselessSince >= DEFENSELESS_DELAY_MS;
+
+        // Punish window: only the fire bomb drives this. The shield drops when the fire bomb attack
+        // lands and stays down until the demon is attacked once, so the swap happens after the
+        // bombs have exploded and the dodge is over, and the window closes with the first player
+        // hit (or after a timeout). The shield drop at the start of a fight is intentionally NOT
+        // handled here. This runs before the special-attack block so a spec weapon is never used
+        // for the shield-down hit.
+        if (!config.usePunishGear()) {
+            punishGearArmed = false;
+        }
+
+        long punishPhaseStartsAt = Math.max(lastFirebombTime + PUNISH_PHASE_DELAY_MS, dodgeUntil);
+
+        // If a hit already landed after the bombs, the shield has been consumed and there is
+        // nothing left to punish: do not waste a gear swap on it. Hits before the bomb impact
+        // (while still dodging) do not count, because the shield is not down yet.
+        if (punishGearArmed && lastFirebombTime > 0
+                && lastPlayerHitOnTargetAt >= lastFirebombTime + PUNISH_PHASE_DELAY_MS) {
+            punishGearArmed = false;
+        }
+
+        if (config.usePunishGear() && lastFirebombTime > 0 && punishGearArmed
+                && !inDefenselessPhase && now >= punishPhaseStartsAt) {
+            HeadIcon overhead = getHeadIcon(currentTarget);
+            List<String> punishGear = overhead == null
+                    ? Collections.emptyList()
+                    : getPunishGearForOverhead(config, overhead);
+            if (!punishGear.isEmpty()) {
+                if (!swappedForPunish || !isGearEquipped(punishGear)) {
+                    saveCurrentGear();
+                    if (swappedForSpec) {
+                        // Keep the pre-spec gear list as the restore target so the punish swap does
+                        // not bounce through a pointless spec-gear restore first.
+                        swappedForSpec = false;
+                    }
+                    logOnceToChat("Swapping to Punish gear vs " + overhead
+                            + " for shield down phase.");
+                    equipGear(punishGear);
+                    swappedForPunish = true;
+                    punishSwappedAt = System.currentTimeMillis();
+                    gearSwitchGraceUntil = System.currentTimeMillis() + GEAR_SWITCH_GRACE_MS;
+                }
+                inPunishPhase = true;
+            }
+        }
+
+        if (swappedForPunish) {
+            long windowStart = Math.max(punishSwappedAt,
+                    lastFirebombTime + PUNISH_PHASE_DELAY_MS);
+            // A hitsplat from the player on the target is the reliable "shield consumed" signal;
+            // player animations also fire for walking and running, which happens during the dodge.
+            boolean attackLanded = lastPlayerHitOnTargetAt >= windowStart;
+            boolean timedOut = now - punishSwappedAt >= PUNISH_MAX_HOLD_MS;
+            if (attackLanded || timedOut) {
+                // The shield is back up after the first attack; return to the normal prayer-based
+                // rotation instead of keeping the slow weapon equipped.
+                inPunishPhase = false;
+                punishGearArmed = false;
+                restoreGearAfterPhases(config);
+            } else {
+                inPunishPhase = true;
+            }
+        } else if (punishGearArmed && now >= punishPhaseStartsAt + PUNISH_MAX_HOLD_MS) {
+            // Punish gear is not configured for the current overhead; do not stay armed forever.
+            punishGearArmed = false;
+        }
+
+        // Handle special attack gear during defenseless phase. The set is chosen by the demon's
+        // overhead prayer, so a spec weapon that only works against certain prayers (e.g. the Blue
+        // Moon spear needing its full set) is never swapped in for a prayer it cannot beat.
+        List<String> specGear = getSpecGearForOverhead(config, getHeadIcon(currentTarget));
+        boolean specGearConfigured = config.useSpecialAttackGear() && !specGear.isEmpty();
+        if (specGearConfigured && inDefenselessPhase) {
+            int energy = Rs2Combat.getSpecEnergy();
+            int threshold = specThresholdEnergy(config);
+            if (energy >= threshold) {
+                if (!swappedForSpec || !isGearEquipped(specGear)) {
+                    saveCurrentGear();
+                    logOnceToChat("Swapping to Special Attack gear for defenseless phase.");
+                    debugSpecialAttack(config, "swapping spec gear energy=" + energy
+                            + " threshold=" + threshold + " items=" + specGear);
+                    equipGear(specGear);
+                    swappedForSpec = true;
+                    gearSwitchGraceUntil = System.currentTimeMillis() + GEAR_SWITCH_GRACE_MS;
+                }
+            } else if (swappedForSpec) {
+                debugSpecialAttack(config, "spec energy below threshold energy=" + energy
+                        + " threshold=" + threshold + "; restoring normal gear");
+                restoreGearAfterPhases(config);
+            }
+        } else if (swappedForSpec) {
+            // Either the defenseless phase ended or this prayer has no spec set configured; either
+            // way the spec gear must not stay equipped.
+            debugSpecialAttack(config, "spec window ended defenseless=" + inDefenselessPhase
+                    + " gear=" + (specGear.isEmpty() ? "none" : specGear.size() + " items"));
+            restoreGearAfterPhases(config);
+        }
+    }
+
+    private List<String> getPunishGearForOverhead(TormentedDemonConfig config, HeadIcon overhead) {
+        if (overhead == null) {
+            return Collections.emptyList();
+        }
+        switch (overhead) {
+            case MELEE:
+                return parseGear(config.punishGearVsMelee());
+            case RANGED:
+                return parseGear(config.punishGearVsRange());
+            case MAGIC:
+                return parseGear(config.punishGearVsMagic());
+            default:
+                return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Resolves the special attack gear for the demon's current overhead prayer.
+     * <p>
+     * Per-prayer boxes take priority. When none of them are filled in, the single fallback
+     * special attack gear box is used so existing single-set configurations keep working. An empty
+     * result means "do not special attack against this prayer".
+     */
+    private List<String> getSpecGearForOverhead(TormentedDemonConfig config, HeadIcon overhead) {
+        List<String> vsMelee = parseGear(config.specialAttackGearVsMelee());
+        List<String> vsRange = parseGear(config.specialAttackGearVsRange());
+        List<String> vsMagic = parseGear(config.specialAttackGearVsMagic());
+
+        if (vsMelee.isEmpty() && vsRange.isEmpty() && vsMagic.isEmpty()) {
+            return parseGear(config.specialAttackGear());
+        }
+
+        if (overhead == null) {
+            return Collections.emptyList();
+        }
+        switch (overhead) {
+            case MELEE:
+                return vsMelee;
+            case RANGED:
+                return vsRange;
+            case MAGIC:
+                return vsMagic;
+            default:
+                return Collections.emptyList();
         }
     }
 
     private void activateOffensivePrayer(TormentedDemonConfig config, CombatStyle style) {
-        Rs2PrayerEnum newOffensivePrayer;
+        if (style == null) {
+            return;
+        }
+
+        Rs2PrayerEnum desired;
         switch (style) {
             case MAGIC: {
                 TormentedDemonConfig.MagicOffensivePrayer option = config.magicOffensivePrayer();
-                newOffensivePrayer = option.isAuto() ? Rs2Prayer.getBestMagePrayer() : option.getPrayer();
+                desired = option.isAuto() ? Rs2Prayer.getBestMagePrayer() : option.getPrayer();
                 break;
             }
             case RANGE: {
                 TormentedDemonConfig.RangedOffensivePrayer option = config.rangeOffensivePrayer();
-                newOffensivePrayer = option.isAuto() ? Rs2Prayer.getBestRangePrayer() : option.getPrayer();
+                desired = option.isAuto() ? Rs2Prayer.getBestRangePrayer() : option.getPrayer();
                 break;
             }
             case MELEE: {
                 TormentedDemonConfig.MeleeOffensivePrayer option = config.meleeOffensivePrayer();
-                newOffensivePrayer = option.isAuto() ? Rs2Prayer.getBestMeleePrayer() : option.getPrayer();
+                desired = option.isAuto() ? Rs2Prayer.getBestMeleePrayer() : option.getPrayer();
                 break;
             }
             default:
                 return;
         }
 
-        if (newOffensivePrayer == null) {
+        if (desired == null) {
             disableOffensivePrayer();
             return;
         }
 
-        if (newOffensivePrayer != currentOffensivePrayer) {
-            logOnceToChat("Changing offensive prayer to " + newOffensivePrayer.getName() + ".");
-            switchOffensivePrayer(newOffensivePrayer);
-            sleep(100);
+        // Trust the game state over the cached field: a prayer can drop on its own (prayer points,
+        // a manual click, quick-prayer changes) and the old code then never switched it back on.
+        if (currentOffensivePrayer == desired && Rs2Prayer.isPrayerActive(desired)) {
+            return;
         }
-    }
 
-    private void switchOffensivePrayer(Rs2PrayerEnum newOffensivePrayer) {
-        if (currentOffensivePrayer != null) {
-            Rs2Prayer.toggle(currentOffensivePrayer, false);
+        long now = System.currentTimeMillis();
+        if (now - lastOffensivePrayerAttemptAt < OFFENSIVE_PRAYER_RETRY_MS) {
+            return;
         }
-        boolean activated = Rs2Prayer.toggle(newOffensivePrayer, true);
-        if (activated) {
-            currentOffensivePrayer = newOffensivePrayer;
-        } else {
+        lastOffensivePrayerAttemptAt = now;
+
+        if (currentOffensivePrayer != null && currentOffensivePrayer != desired) {
+            setPrayerActive(currentOffensivePrayer, false);
             currentOffensivePrayer = null;
-            logOnceToChat("Could not activate " + newOffensivePrayer.getName()
+        }
+
+        boolean activated = setPrayerActive(desired, true);
+        currentOffensivePrayer = activated ? desired : null;
+        if (activated) {
+            logOnceToChat("Offensive prayer on: " + desired.getName() + " (" + style + ").");
+        } else {
+            logOnceToChat("Could not activate " + desired.getName()
                     + "; check prayer level, unlocks, and prayer points.");
         }
     }
 
+    /**
+     * Starts or stops a single prayer without the 10-second blocking wait built into
+     * {@link Rs2Prayer#toggle(Rs2PrayerEnum, boolean)}. A prayer that cannot be activated (not
+     * unlocked, no prayer points) would otherwise stall the whole combat loop on every attempt.
+     */
+    private boolean setPrayerActive(Rs2PrayerEnum prayer, boolean on) {
+        if (prayer == null) {
+            return false;
+        }
+        if (Rs2Prayer.isPrayerActive(prayer) == on) {
+            return true;
+        }
+        if (on && Rs2Prayer.isOutOfPrayer()) {
+            return false;
+        }
+
+        Microbot.doInvoke(new NewMenuEntry()
+                .param0(-1)
+                .param1(prayer.getIndex())
+                .opcode(MenuAction.CC_OP.getId())
+                .identifier(1)
+                .itemId(-1)
+                .option(on ? "Activate" : "Deactivate"), Rs2UiHelper.getDefaultRectangle());
+        return sleepUntil(() -> Rs2Prayer.isPrayerActive(prayer) == on, 1_200);
+    }
+
     private void disableOffensivePrayer() {
         if (currentOffensivePrayer != null) {
-            Rs2Prayer.toggle(currentOffensivePrayer, false);
+            setPrayerActive(currentOffensivePrayer, false);
             currentOffensivePrayer = null;
         }
     }
@@ -1039,19 +1955,316 @@ public class TormentedDemonScript extends Script {
         return Math.max(1, (int) Math.ceil(maxPrayer * (config.minPrayerPercent() / 100.0)));
     }
 
-    private boolean shouldRetreat(TormentedDemonConfig config) {
+    /**
+     * Leaves combat when the player can no longer be kept alive: health at the exit threshold, no
+     * food left when the bot wants to eat, or no prayer doses left at the prayer threshold.
+     *
+     * <p>Full Auto keeps its original behaviour and retreats to Ferox Enclave to restock. Combat
+     * Only cannot restock, so it stops the plugin instead of standing in the cave until it dies.</p>
+     *
+     * <p>Runs on every fighting tick, including after a kill and while no demon is targeted, so a
+     * finished fight or an empty cave cannot hide a low-health state.</p>
+     *
+     * @return true when combat must stop for this tick (retreat or plugin stop)
+     */
+    private boolean handleSupplySafety(TormentedDemonConfig config) {
+        boolean fullAuto = config.mode() == TormentedDemonConfig.MODE.FULL_AUTO;
+        if (!fullAuto && !config.stopWhenOutOfSupplies()) {
+            return false;
+        }
+
         double healthPercentage = Rs2Player.getHealthPercentage();
         int currentPrayer = Rs2Player.getBoostedSkillLevel(Skill.PRAYER);
-        int prayerThreshold = prayerThreshold(config);
-        boolean noFood = Rs2Inventory.getInventoryFood().isEmpty();
-        boolean noPrayerPotions = Rs2Inventory.items()
-                .noneMatch(item -> item != null && item.getName() != null
-                        && item.getName().toLowerCase().contains("prayer potion"));
+        boolean outOfFood = !hasHealingSupply();
+        boolean outOfPrayerPotions = !hasPrayerSupply();
+        boolean prayerEnabled = usesPrayer(config);
 
-        if (healthPercentage <= config.healthThreshold()) return true;
-        if (noFood && healthPercentage <= config.minEatPercent()) return true;
-        boolean usesPrayer = config.enableDefensivePrayer() || config.enableOffensivePrayer();
-        return usesPrayer && noPrayerPotions && currentPrayer <= prayerThreshold;
+        boolean healthExit;
+        if (fullAuto) {
+            healthExit = healthPercentage <= config.healthThreshold()
+                    || (outOfFood && healthPercentage <= config.minEatPercent());
+        } else {
+            // With no food the eat threshold becomes the stop point: from there on the bot can no
+            // longer heal, so waiting for the lower exit threshold would only add risk.
+            healthExit = outOfFood
+                    && healthPercentage <= Math.max(config.healthThreshold(), config.minEatPercent());
+        }
+        boolean prayerExit = prayerEnabled
+                && outOfPrayerPotions
+                && currentPrayer <= prayerThreshold(config);
+
+        if (!healthExit && !prayerExit) {
+            return false;
+        }
+
+        String reason;
+        if (prayerExit) {
+            reason = String.format(Locale.ROOT,
+                    "No prayer potions left and prayer is %d (threshold %d)",
+                    currentPrayer, prayerThreshold(config));
+        } else if (outOfFood) {
+            reason = String.format(Locale.ROOT,
+                    "No food left and health is %.0f%% (exit threshold %d%%)",
+                    healthPercentage, config.healthThreshold());
+        } else {
+            reason = String.format(Locale.ROOT,
+                    "Health is %.0f%%, at or below the %d%% exit threshold",
+                    healthPercentage, config.healthThreshold());
+        }
+
+        if (fullAuto) {
+            Microbot.status = reason + ". Retreating to Ferox Enclave to restock.";
+            logOnceToChat(Microbot.status);
+            currentTarget = null;
+            currentTargetIndex = -1;
+            currentOverheadIcon = null;
+            currentCombatStyle = null;
+            restoreGearAfterPhases(config);
+            BOT_STATUS = State.RETREAT;
+            return true;
+        }
+
+        stopForSupplies(config, reason, true);
+        return true;
+    }
+
+    private boolean usesPrayer(TormentedDemonConfig config) {
+        return config.enableDefensivePrayer() || config.enableOffensivePrayer();
+    }
+
+    /**
+     * True when the inventory holds something the eat helper can actually consume. Noted food is
+     * excluded by {@link Rs2Inventory#getInventoryFood()}, which matches the eating logic.
+     */
+    private boolean hasHealingSupply() {
+        return !Rs2Inventory.getInventoryFood().isEmpty();
+    }
+
+    /**
+     * True when any prayer-restoring dose is in the inventory. Doses are separate items, so any
+     * match means at least one dose; names are compared without the (4)/(3)/(2)/(1) suffix.
+     */
+    private boolean hasPrayerSupply() {
+        return Rs2Inventory.items().anyMatch(item -> item != null && isPrayerSupply(item.getName()));
+    }
+
+    private boolean bankHasHealingSupply() {
+        return Rs2Bank.bankItems().stream()
+                .anyMatch(item -> item != null && item.getQuantity() > 0 && item.isFood());
+    }
+
+    private boolean bankHasPrayerSupply() {
+        return Rs2Bank.bankItems().stream()
+                .anyMatch(item -> item != null && item.getQuantity() > 0 && isPrayerSupply(item.getName()));
+    }
+
+    private boolean isPrayerSupply(String itemName) {
+        String baseName = normalizePotionName(itemName);
+        return !baseName.isEmpty() && PRAYER_SUPPLY_NAMES.contains(baseName);
+    }
+
+    private void stopForSupplies(TormentedDemonConfig config, String reason, boolean escapeFirst) {
+        // Only a stop that happens away from the bank can leave the player in the cave mid-fight.
+        if (escapeFirst && shouldEscapeBeforeStopping(config)) {
+            escapeBeforeStopping(config);
+        }
+        disableAllPrayers();
+        Microbot.status = reason + ". Stopping.";
+        logOnceToChat(Microbot.status);
+        Microbot.stopPlugin(TormentedDemonPlugin.class);
+    }
+
+    /**
+     * True when stopping right now would strand the player next to a Tormented Demon with no
+     * supplies. {@link Rs2Player#isInCombat()} uses a 10 second window, so a demon that has not
+     * connected for a moment still counts.
+     */
+    private boolean shouldEscapeBeforeStopping(TormentedDemonConfig config) {
+        if (!config.emergencyTeleport()
+                || config.emergencyTeleportMethod() == TormentedDemonConfig.EmergencyTeleportMethod.NONE) {
+            return false;
+        }
+        return Rs2Player.isInCombat() || Rs2Player.isInteracting();
+    }
+
+    /**
+     * Leaves the cave before the plugin shuts down. Offensive prayer is dropped because it cannot
+     * be used while leaving, but protection stays up until shutdown so the last hits are still
+     * reduced. The configured teleport is tried first; if it is missing or fails, the plugin works
+     * down {@link #EMERGENCY_TELEPORT_FALLBACKS}. If nothing works the stop continues so the bot
+     * never hangs in a dying state.
+     */
+    private void escapeBeforeStopping(TormentedDemonConfig config) {
+        TormentedDemonConfig.EmergencyTeleportMethod method = config.emergencyTeleportMethod();
+        disableOffensivePrayer();
+        Microbot.status = "Teleporting out before stopping...";
+        logOnceToChat(Microbot.status);
+
+        boolean teleported = false;
+        if (hasEmergencyTeleport(method)) {
+            teleported = attemptEmergencyTeleport(method);
+            if (!teleported) {
+                logOnceToChat("Emergency teleport failed (" + method + "); trying another.");
+            }
+        } else {
+            logOnceToChat("Emergency teleport not available (" + method + "); trying another.");
+        }
+
+        if (!teleported) {
+            for (TormentedDemonConfig.EmergencyTeleportMethod fallback : EMERGENCY_TELEPORT_FALLBACKS) {
+                if (fallback == method || !hasEmergencyTeleport(fallback)) {
+                    continue;
+                }
+                logOnceToChat("Trying emergency teleport: " + fallback + ".");
+                if (attemptEmergencyTeleport(fallback)) {
+                    teleported = true;
+                    break;
+                }
+            }
+        }
+
+        if (!teleported) {
+            logOnceToChat("No emergency teleport available; stopping while still in combat.");
+            return;
+        }
+
+        if (sleepUntil(() -> !Rs2Player.isInCombat(), EMERGENCY_TELEPORT_COMBAT_WAIT_MS)) {
+            logOnceToChat("Emergency teleport complete; out of combat, stopping.");
+        } else {
+            logOnceToChat("Still in combat " + (EMERGENCY_TELEPORT_COMBAT_WAIT_MS / 1000)
+                    + "s after the emergency teleport; stopping anyway.");
+        }
+    }
+
+    private boolean attemptEmergencyTeleport(TormentedDemonConfig.EmergencyTeleportMethod method) {
+        switch (method) {
+            case RING_OF_DUELING:
+                return teleportToFeroxEnclave();
+            case AMULET_OF_GLORY:
+                return teleportWithJewellery("Amulet of glory", JewelleryLocationEnum.EDGEVILLE.getDestination());
+            case RING_OF_WEALTH:
+                return teleportWithJewellery("Ring of wealth", JewelleryLocationEnum.GRAND_EXCHANGE.getDestination());
+            case SKILLS_NECKLACE:
+                return teleportWithJewellery("Skills necklace", JewelleryLocationEnum.FISHING_GUILD_NECK.getDestination());
+            case COMBAT_BRACELET:
+                return teleportWithJewellery("Combat bracelet", JewelleryLocationEnum.WARRIORS_GUILD.getDestination());
+            case ROYAL_SEED_POD:
+                return useTeleportItem(ItemID.MM2_ROYAL_SEED_POD, "Commune", "royal seed pod");
+            case VARROCK_TAB:
+                return useTeleportItem(ItemID.POH_TABLET_VARROCKTELEPORT, "Break", "Varrock teleport tab");
+            case LUMBRIDGE_TAB:
+                return useTeleportItem(ItemID.POH_TABLET_LUMBRIDGETELEPORT, "Break", "Lumbridge teleport tab");
+            case FALADOR_TAB:
+                return useTeleportItem(ItemID.POH_TABLET_FALADORTELEPORT, "Break", "Falador teleport tab");
+            case CAMELOT_TAB:
+                return useTeleportItem(ItemID.POH_TABLET_CAMELOTTELEPORT, "Break", "Camelot teleport tab");
+            case ARDOUGNE_TAB:
+                return useTeleportItem(ItemID.POH_TABLET_ARDOUGNETELEPORT, "Break", "Ardougne teleport tab");
+            case WATCHTOWER_TAB:
+                return useTeleportItem(ItemID.POH_TABLET_WATCHTOWERTELEPORT, "Break", "Watchtower teleport tab");
+            case HOUSE_TAB:
+                return useTeleportItem(ItemID.POH_TABLET_TELEPORTTOHOUSE, "Break", "house teleport tab");
+            case GUTHIXIAN_TEMPLE:
+                return teleportToGuthixianTemple();
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * True when the configured emergency teleport could actually be used right now, so the
+     * fallback list only logs and tries teleports the player really has.
+     */
+    private boolean hasEmergencyTeleport(TormentedDemonConfig.EmergencyTeleportMethod method) {
+        switch (method) {
+            case RING_OF_DUELING:
+                return isWearingOrHolding("Ring of dueling");
+            case AMULET_OF_GLORY:
+                return isWearingOrHolding("Amulet of glory");
+            case RING_OF_WEALTH:
+                return isWearingOrHolding("Ring of wealth");
+            case SKILLS_NECKLACE:
+                return isWearingOrHolding("Skills necklace");
+            case COMBAT_BRACELET:
+                return isWearingOrHolding("Combat bracelet");
+            case ROYAL_SEED_POD:
+                return Rs2Inventory.hasItem(ItemID.MM2_ROYAL_SEED_POD);
+            case VARROCK_TAB:
+                return Rs2Inventory.hasItem(ItemID.POH_TABLET_VARROCKTELEPORT);
+            case LUMBRIDGE_TAB:
+                return Rs2Inventory.hasItem(ItemID.POH_TABLET_LUMBRIDGETELEPORT);
+            case FALADOR_TAB:
+                return Rs2Inventory.hasItem(ItemID.POH_TABLET_FALADORTELEPORT);
+            case CAMELOT_TAB:
+                return Rs2Inventory.hasItem(ItemID.POH_TABLET_CAMELOTTELEPORT);
+            case ARDOUGNE_TAB:
+                return Rs2Inventory.hasItem(ItemID.POH_TABLET_ARDOUGNETELEPORT);
+            case WATCHTOWER_TAB:
+                return Rs2Inventory.hasItem(ItemID.POH_TABLET_WATCHTOWERTELEPORT);
+            case HOUSE_TAB:
+                return Rs2Inventory.hasItem(ItemID.POH_TABLET_TELEPORTTOHOUSE);
+            case GUTHIXIAN_TEMPLE:
+                return Rs2Inventory.hasItem("Guthixian temple teleport");
+            default:
+                return false;
+        }
+    }
+
+    private boolean isWearingOrHolding(String itemName) {
+        return Rs2Equipment.isWearing(itemName) || Rs2Inventory.hasItem(itemName);
+    }
+
+    /**
+     * Rubs a teleport jewellery item. Worn jewellery is used directly; one in the inventory is
+     * equipped first because the destinations live on the equipment menu.
+     */
+    private boolean teleportWithJewellery(String itemName, String destination) {
+        if (!Rs2Equipment.isWearing(itemName)) {
+            if (!Rs2Inventory.hasItem(itemName) || !Rs2Inventory.interact(itemName, "Wear")) {
+                return false;
+            }
+            if (!sleepUntil(() -> Rs2Equipment.isWearing(itemName), 3000)) {
+                return false;
+            }
+        }
+        WorldPoint before = Rs2Player.getWorldLocation();
+        if (!Rs2Equipment.interact(itemName, destination)) {
+            return false;
+        }
+        logOnceToChat("Teleporting with " + itemName + " (" + destination + ").");
+        return waitForTeleport(before);
+    }
+
+    /**
+     * Breaks a teleport tablet, or uses any other single-click teleport item.
+     */
+    private boolean useTeleportItem(int itemId, String action, String label) {
+        if (!Rs2Inventory.hasItem(itemId)) {
+            return false;
+        }
+        WorldPoint before = Rs2Player.getWorldLocation();
+        if (!Rs2Inventory.interact(itemId, action)) {
+            return false;
+        }
+        logOnceToChat("Using the " + label + " to leave the cave.");
+        return waitForTeleport(before);
+    }
+
+    /**
+     * Waits for the teleport animation to finish and for the player to actually move. Comparing
+     * positions works for every destination, including the player-owned house, whose location
+     * differs per account.
+     */
+    private boolean waitForTeleport(WorldPoint before) {
+        Rs2Player.waitForAnimation();
+        sleepUntil(() -> !Rs2Player.isAnimating(), 5000);
+        if (before == null) {
+            return true;
+        }
+        return sleepUntil(() -> {
+            WorldPoint moved = Rs2Player.getWorldLocation();
+            return moved != null && moved.distanceTo(before) > 20;
+        }, 12_000);
     }
 
     public void disableAllPrayers() {
@@ -1060,6 +2273,15 @@ public class TormentedDemonScript extends Script {
     }
 
     private void attemptLooting(TormentedDemonConfig config) {
+        Map<Integer, Integer> inventoryBefore = snapshotInventoryCounts();
+        try {
+            doLoot(config);
+        } finally {
+            recordLootGained(inventoryBefore);
+        }
+    }
+
+    private void doLoot(TormentedDemonConfig config) {
         if (!config.toggleLoot()) {
             if (config.scatterAshes()) {
                 lootAndScatterInfernalAshes(config);
@@ -1083,7 +2305,7 @@ public class TormentedDemonScript extends Script {
                 config.toggleDelayedLooting(),
                 config.toggleLootMyItemsOnly()
         );
-        params.setEatFoodForSpace(config.mode() == TormentedDemonConfig.MODE.FULL_AUTO);
+        params.setEatFoodForSpace(false);
 
         Rs2LootEngine.Builder builder = Rs2LootEngine.with(params)
                 .withLootAction(this::lootGroundItem);
@@ -1119,7 +2341,14 @@ public class TormentedDemonScript extends Script {
             builder.addCustom("herbs", herbs, null);
         }
 
-        builder.loot();
+        boolean looted = builder.loot();
+        // The loot engine no longer eats for space itself; the inventory-full policy decides what
+        // happens. If it frees a slot, give the engine another pass at the items left behind.
+        for (int pass = 0; pass < LOOT_SPACE_PASSES && !looted; pass++) {
+            if (!Rs2Inventory.isFull()) break;
+            if (handleInventoryFull(config) != SpaceResult.FREED) break;
+            looted = builder.loot();
+        }
 
         if (config.scatterAshes()) {
             lootAndScatterInfernalAshes(config);
@@ -1128,7 +2357,6 @@ public class TormentedDemonScript extends Script {
 
     private void lootAndScatterInfernalAshesDirect(TormentedDemonConfig config) {
         try {
-            if (Rs2Inventory.isFull()) return;
             if (config.mode() == TormentedDemonConfig.MODE.FULL_AUTO
                     && Rs2Player.getHealthPercentage() <= config.healthThreshold()) {
                 return;
@@ -1140,6 +2368,7 @@ public class TormentedDemonScript extends Script {
                     .within(config.lootRadius())
                     .nearest();
             if (ashes == null) return;
+            if (!hasInventorySpaceForLoot(config)) return;
             Microbot.log("Looting Infernal ashes directly...");
             if (!ashes.pickup()) return;
             if (!sleepUntil(() -> Rs2Inventory.contains("Infernal ashes"), 2500)) return;
@@ -1184,7 +2413,6 @@ public class TormentedDemonScript extends Script {
     }
 
     private void lootAndScatterInfernalAshes(TormentedDemonConfig config) {
-        if (Rs2Inventory.isFull()) return;
         if (config.mode() == TormentedDemonConfig.MODE.FULL_AUTO
                 && Rs2Player.getHealthPercentage() <= config.healthThreshold()) {
             return;
@@ -1196,11 +2424,201 @@ public class TormentedDemonScript extends Script {
                 .within(config.lootRadius())
                 .nearest();
         if (ashes == null) return;
+        if (!hasInventorySpaceForLoot(config)) return;
         if (!ashes.pickup()) return;
         if (!sleepUntil(() -> Rs2Inventory.contains("Infernal ashes"), 2500)) return;
 
         Rs2Inventory.interact("Infernal ashes", "Scatter");
         sleepUntil(() -> !Rs2Inventory.contains("Infernal ashes"), 2500);
+    }
+
+    private enum SpaceResult {
+        /** A slot was freed, so looting can continue. */
+        FREED,
+        /** Nothing was freed; the item is left on the ground. */
+        NOT_FREED,
+        /** The configured actions asked for a stop and it has been requested. */
+        STOP
+    }
+
+    /**
+     * Makes room for a loot attempt when the inventory is full. The configured primary action is
+     * tried first; if it cannot free a slot the fallback is tried; if that also fails the plugin
+     * stops with an "Inventory full" message. Choosing <em>Do nothing</em> for either slot means
+     * "leave the item on the ground" from that point on, so a Do nothing primary never stops.
+     */
+    private SpaceResult handleInventoryFull(TormentedDemonConfig config) {
+        if (!Rs2Inventory.isFull()) {
+            return SpaceResult.FREED;
+        }
+
+        TormentedDemonConfig.InventoryFullAction primary = config.inventoryFullAction();
+        TormentedDemonConfig.InventoryFullAction fallback = config.inventoryFullFallback();
+
+        if (primary == TormentedDemonConfig.InventoryFullAction.DO_NOTHING) {
+            logOnceToChat("Inventory full; leaving the item on the ground.");
+            return SpaceResult.NOT_FREED;
+        }
+
+        SpaceResult result = applyInventoryFullAction(config, primary);
+        if (result != SpaceResult.NOT_FREED) {
+            return result;
+        }
+
+        if (fallback == TormentedDemonConfig.InventoryFullAction.DO_NOTHING || fallback == primary) {
+            logOnceToChat("Inventory still full; leaving the item on the ground.");
+            return SpaceResult.NOT_FREED;
+        }
+
+        result = applyInventoryFullAction(config, fallback);
+        if (result != SpaceResult.NOT_FREED) {
+            return result;
+        }
+
+        if (!inventoryFullStopIssued) {
+            inventoryFullStopIssued = true;
+            logOnceToChat("Inventory full; no configured action freed a slot.");
+            stopForSupplies(config, "Inventory full", true);
+        }
+        return SpaceResult.STOP;
+    }
+
+    private SpaceResult applyInventoryFullAction(TormentedDemonConfig config,
+                                                 TormentedDemonConfig.InventoryFullAction action) {
+        if (!Rs2Inventory.isFull()) {
+            return SpaceResult.FREED;
+        }
+
+        switch (action) {
+            case EAT_FOOD:
+                return eatFoodForSpace() ? SpaceResult.FREED : SpaceResult.NOT_FREED;
+            case SCATTER_ASHES:
+                return freeSlotWithAshesOrBones() ? SpaceResult.FREED : SpaceResult.NOT_FREED;
+            case DEMONIC_OFFERING:
+                return castDemonicOfferingForSpace() ? SpaceResult.FREED : SpaceResult.NOT_FREED;
+            case STOP_PLUGIN:
+                if (!inventoryFullStopIssued) {
+                    inventoryFullStopIssued = true;
+                    stopForSupplies(config, "Inventory full", true);
+                }
+                return SpaceResult.STOP;
+            default:
+                return SpaceResult.NOT_FREED;
+        }
+    }
+
+    private boolean hasInventorySpaceForLoot(TormentedDemonConfig config) {
+        return !Rs2Inventory.isFull() || handleInventoryFull(config) == SpaceResult.FREED;
+    }
+
+    /**
+     * Eats one food so the slot it occupied can take loot. Food is always eaten, even at full
+     * health, because the point is the slot and not the healing.
+     */
+    private boolean eatFoodForSpace() {
+        if (Rs2Inventory.getInventoryFood().isEmpty()) {
+            return false;
+        }
+        int before = Rs2Inventory.emptySlotCount();
+        logOnceToChat("Inventory full; eating food for space.");
+        if (!Rs2Player.eatAt(100)) {
+            return false;
+        }
+        Rs2Player.waitForAnimation();
+        return sleepUntil(() -> Rs2Inventory.emptySlotCount() > before, 3000);
+    }
+
+    /**
+     * Scatters one ashes item or buries one bones item. Bones are used before ashes, and plain
+     * ashes before infernal ashes, so the most valuable remains are kept as long as possible.
+     */
+    private boolean freeSlotWithAshesOrBones() {
+        Rs2ItemModel target = findScatterTarget();
+        if (target == null) {
+            return false;
+        }
+
+        String name = target.getName();
+        boolean bones = isBonesName(name);
+        int before = Rs2Inventory.emptySlotCount();
+        logOnceToChat("Inventory full; using " + name + " to free a slot.");
+        if (!Rs2Inventory.interact(target, bones ? "Bury" : "Scatter")) {
+            return false;
+        }
+        Rs2Player.waitForAnimation();
+        return sleepUntil(() -> Rs2Inventory.emptySlotCount() > before, 3000);
+    }
+
+    private Rs2ItemModel findScatterTarget() {
+        List<Rs2ItemModel> remains = Rs2Inventory.items(item -> !item.isNoted()
+                        && (isBonesName(item.getName()) || isAshesName(item.getName())))
+                .collect(Collectors.toList());
+        if (remains.isEmpty()) {
+            return null;
+        }
+
+        Rs2ItemModel otherAshes = null;
+        Rs2ItemModel infernalAshes = null;
+        for (Rs2ItemModel item : remains) {
+            String name = normalizeItemName(item.getName());
+            if (isBonesName(name)) {
+                return item;
+            }
+            if (name.contains("infernal ashes")) {
+                infernalAshes = item;
+            } else if (otherAshes == null) {
+                otherAshes = item;
+            }
+        }
+        return otherAshes != null ? otherAshes : infernalAshes;
+    }
+
+    private boolean isBonesName(String name) {
+        String normalized = normalizeItemName(name);
+        return normalized.equals("bones") || normalized.endsWith(" bones");
+    }
+
+    private boolean isAshesName(String name) {
+        return normalizeItemName(name).endsWith("ashes");
+    }
+
+    private String normalizeItemName(String name) {
+        return name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Casts Demonic Offering to convert up to three demonic ashes into prayer points, freeing the
+     * slots they occupied. Silently ignored when the player is not on Arceuus, lacks the level or
+     * runes, has no demonic ashes, or the 5.4 s cooldown has not elapsed.
+     */
+    private boolean castDemonicOfferingForSpace() {
+        if (!canCastDemonicOffering()) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastDemonicOfferingAt < DEMONIC_OFFERING_COOLDOWN_MS) {
+            return false;
+        }
+        if (!Rs2Magic.cast(Rs2Spells.DEMONIC_OFFERING)) {
+            return false;
+        }
+        lastDemonicOfferingAt = now;
+        logOnceToChat("Inventory full; casting Demonic Offering for space.");
+        return sleepUntil(() -> !Rs2Inventory.isFull(), 3000);
+    }
+
+    private boolean canCastDemonicOffering() {
+        return Rs2Magic.isSpellbook(Rs2Spellbook.ARCEUUS)
+                && Rs2Spells.DEMONIC_OFFERING.hasRequiredLevel()
+                && hasDemonicAshes()
+                && Rs2Magic.hasRequiredRunes(Rs2Spells.DEMONIC_OFFERING);
+    }
+
+    private boolean hasDemonicAshes() {
+        return Rs2Inventory.items(item -> !item.isNoted()
+                        && DEMONIC_ASHES_NAMES.contains(normalizeItemName(item.getName())))
+                .findAny()
+                .isPresent();
     }
 
     private List<String> parseLootItems(String lootFilter) {
@@ -1297,8 +2715,109 @@ public class TormentedDemonScript extends Script {
         return name.endsWith(" potion") ? name : name + " potion";
     }
 
-    private String normalizePotionName(String name) {
-        return name.toLowerCase().replaceAll("\\s*\\(\\d+\\)\\s*$", "").trim();
+    private static String normalizePotionName(String name) {
+        if (name == null) return "";
+        return name.toLowerCase(Locale.ROOT).replaceAll("\\s*\\(\\d+\\)\\s*$", "").trim();
+    }
+
+    /** Average kill time across this session, 0 when no kill has been timed yet. */
+    public static long getAverageKillTimeMs() {
+        return timedKills == 0 ? 0 : totalKillTimeMs / timedKills;
+    }
+
+    /** Average loot value per kill on the current trip, 0 when the trip has no kills yet. */
+    public static long getAverageLootPerKill() {
+        return tripKills == 0 ? 0 : tripLootValue / tripKills;
+    }
+
+    /** Total loot value gathered since the current trip started. */
+    public static long getTripLootValue() {
+        return tripLootValue;
+    }
+
+    /** Readable form of {@link #BOT_STATUS} for the overlay. */
+    public static String getStatusDisplay() {
+        switch (BOT_STATUS) {
+            case BANKING:
+                return "Banking";
+            case RETREAT:
+                return "Retreating";
+            case TRAVEL_TO_TORMENTED:
+                return "Travelling";
+            case FIGHTING:
+                return "Fighting";
+            default:
+                return String.valueOf(BOT_STATUS);
+        }
+    }
+
+    private void resetTripStats() {
+        tripKills = 0;
+        tripLootValue = 0;
+    }
+
+    /**
+     * Clears every overlay statistic: kill count, kill times, and the current trip's loot. Called
+     * by the "Reset Statistics" button in the Overlay config section.
+     */
+    public static void resetStatistics() {
+        killCount = 0;
+        lastKillTimeMs = 0;
+        totalKillTimeMs = 0;
+        timedKills = 0;
+        tripKills = 0;
+        tripLootValue = 0;
+    }
+
+    /**
+     * Records the duration of a finished fight. Fights started before the plugin (or ones that
+     * timed out waiting for a respawn) are skipped so the averages stay meaningful.
+     */
+    private void recordKillTime(long fightStart) {
+        if (fightStart <= 0) {
+            return;
+        }
+        long duration = System.currentTimeMillis() - fightStart;
+        if (duration <= 0 || duration > MAX_TRACKED_KILL_TIME_MS) {
+            return;
+        }
+        lastKillTimeMs = duration;
+        totalKillTimeMs += duration;
+        timedKills++;
+        tripKills++;
+    }
+
+    private Map<Integer, Integer> snapshotInventoryCounts() {
+        Map<Integer, Integer> counts = new HashMap<>();
+        Rs2Inventory.items().forEach(item -> counts.merge(item.getId(), item.getQuantity(), Integer::sum));
+        return counts;
+    }
+
+    /**
+     * Adds the value of everything that entered the inventory since {@code before} to the trip
+     * total. Items that were consumed or equipped during looting are ignored, so eating food or
+     * scattering ashes cannot lower the recorded loot.
+     */
+    private void recordLootGained(Map<Integer, Integer> before) {
+        try {
+            List<Rs2ItemModel> items = Rs2Inventory.items().collect(Collectors.toList());
+            long gained = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+                long total = 0;
+                for (Rs2ItemModel item : items) {
+                    int delta = item.getQuantity() - before.getOrDefault(item.getId(), 0);
+                    if (delta <= 0) {
+                        continue;
+                    }
+                    total += Microbot.getItemManager().getItemPrice(item.getId()) * delta;
+                }
+                return total;
+            }).orElse(0L);
+            if (gained > 0) {
+                tripLootValue += gained;
+            }
+        } catch (Exception ex) {
+            logOnceToChat("Unable to total loot value: " + ex.getMessage());
+        }
     }
 
     void logOnceToChat(String message) {
@@ -1313,6 +2832,16 @@ public class TormentedDemonScript extends Script {
         super.shutdown();
         releasePluginSpecialAttack(null);
         disableAllPrayers();
+        if (swappedForPunish || swappedForSpec) {
+            if (lastGearList != null && !lastGearList.isEmpty()) {
+                try {
+                    equipGear(lastGearList);
+                } catch (Exception ignored) {
+                }
+            }
+            swappedForPunish = false;
+            swappedForSpec = false;
+        }
         BOT_STATUS = State.BANKING;
         travelStep = TravelStep.LOCATION_ONE;
         bankingStep = BankingStep.DRINK;
@@ -1332,6 +2861,7 @@ public class TormentedDemonScript extends Script {
         warnedArceuus = false;
         lastChatMessage = "";
         dodgeUntil = 0;
+        bombWalkLockUntil = 0;
         if (mainScheduledFuture != null && !mainScheduledFuture.isCancelled()) {
             mainScheduledFuture.cancel(true);
         }

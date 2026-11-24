@@ -1,138 +1,127 @@
 package net.runelite.client.plugins.microbot.autobankstander.skills.magic.enchanting;
 
+import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
+import net.runelite.api.EquipmentInventorySlot;
+import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
+import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Staff;
 import net.runelite.client.plugins.microbot.util.magic.Runes;
-import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
-import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
-import net.runelite.client.plugins.microbot.util.equipment.Rs2Equipment;
 
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class StaffUtils {
-    
+
     /**
-     * Get the currently equipped staff if any
-     * @return the equipped Rs2Staff or null if no staff is equipped
+     * Get the currently equipped staff, using the client's staff lookup instead of
+     * maintaining a parallel list of staff item IDs.
      */
     public static Rs2Staff getEquippedStaff() {
-        for (Rs2Staff staff : Rs2Staff.values()) {
-            if (staff != Rs2Staff.NONE && Rs2Equipment.isWearing(staff.getItemID())) {
-                return staff;
+        return Rs2Equipment.all(EquipmentInventorySlot.WEAPON)
+                .map(Rs2ItemModel::getId)
+                .map(Rs2Staff::byItemId)
+                .filter(staff -> staff != null && staff != Rs2Staff.NONE)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** Rune IDs that are provided by the equipped staff. */
+    public static Set<Integer> getProvidedRunes() {
+        Set<Integer> provided = new HashSet<>();
+        Rs2Staff staff = getEquippedStaff();
+        if (staff == null) {
+            return provided;
+        }
+        for (Runes rune : Runes.values()) {
+            if (staff.provides(rune)) {
+                provided.add(rune.getItemId());
             }
         }
-        return null;
+        return provided;
     }
 
-    /**
-     * Get all rune IDs that are provided by the equipped staff
-     * @return set of rune IDs that are unlimited due to equipped staff
-     */
-    public static Set<Integer> getProvidedRunes() {
-        Rs2Staff equippedStaff = getEquippedStaff();
-        if (equippedStaff == null) return new HashSet<>();
-        
-        Set<Integer> providedRuneIds = new HashSet<>();
-        for (Runes rune : equippedStaff.getRunes()) {
-            providedRuneIds.add(rune.getItemId());
-        }
-        return providedRuneIds;
-    }
-
-    /**
-     * Find the best available staff for the given required runes
-     * Priority: 1) Provides all required runes, 2) Provides most required runes, 3) Single rune staff
-     * @param requiredRunes array of rune IDs needed
-     * @return the best available Rs2Staff or null if none found
-     */
+    /** Find the most useful available staff for the required runes. */
     public static Rs2Staff findBestAvailableStaff(int[] requiredRunes) {
-        Rs2Staff bestStaff = null;
-        int bestScore = -1;
+        List<Runes> runes = Arrays.stream(requiredRunes)
+                .mapToObj(Runes::byItemId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
 
-        // check inventory and bank for available staves
-        for (Rs2Staff staff : Rs2Staff.values()) {
-            if (staff == Rs2Staff.NONE) continue; // skip none
-            
-            boolean hasInInventory = Rs2Inventory.hasItem(staff.getItemID());
-            boolean hasInBank = Rs2Bank.hasItem(staff.getItemID());
-            
-            if (!hasInInventory && !hasInBank) continue; // staff not available
-            
+        List<Rs2Staff> candidates = Rs2Magic.findStavesByRunes(runes);
+        if (candidates == null || candidates.isEmpty()) {
+            candidates = Arrays.asList(Rs2Staff.values());
+        }
+
+        Rs2Staff best = null;
+        int bestScore = -1;
+        for (Rs2Staff staff : candidates) {
+            if (staff == null || staff == Rs2Staff.NONE) {
+                continue;
+            }
+            boolean available = Rs2Inventory.hasItem(staff.getItemID()) || Rs2Bank.hasItem(staff.getItemID());
+            if (!available) {
+                continue;
+            }
             int score = calculateStaffScore(staff, requiredRunes);
             if (score > bestScore) {
                 bestScore = score;
-                bestStaff = staff;
+                best = staff;
             }
         }
-        
-        return bestStaff;
+        return best;
     }
 
-    /**
-     * Calculate a score for how useful a staff is for the given required runes
-     * Higher scores are better
-     * @param staff the staff to evaluate
-     * @param requiredRunes array of rune IDs needed
-     * @return score indicating usefulness of the staff
-     */
+    /** Higher scores mean the staff covers more of the required runes. */
     public static int calculateStaffScore(Rs2Staff staff, int[] requiredRunes) {
-        Set<Integer> staffRuneIds = new HashSet<>();
-        for (Runes rune : staff.getRunes()) {
-            staffRuneIds.add(rune.getItemId());
+        if (staff == null || staff == Rs2Staff.NONE) {
+            return 0;
         }
-        
-        int matchingRunes = 0;
-        for (int requiredRune : requiredRunes) {
-            if (staffRuneIds.contains(requiredRune)) {
-                matchingRunes++;
+
+        int matching = 0;
+        for (int runeId : requiredRunes) {
+            Runes rune = Runes.byItemId(runeId);
+            if (rune != null && staff.provides(rune)) {
+                matching++;
             }
         }
-        
-        if (matchingRunes == requiredRunes.length) {
-            return 1000 + staff.getRunes().size(); // perfect match gets highest score
+
+        if (matching == requiredRunes.length) {
+            return 1000 + staff.getRunes().size();
         }
-        
-        if (matchingRunes > 0) {
-            return matchingRunes * 100; // partial matches get medium scores
-        }
-        
-        return 0; // no matching runes
+        return matching * 100;
     }
 
-    /**
-     * Try to equip the best available staff for the given required runes
-     * @param requiredRunes array of rune IDs needed
-     * @return true if a suitable staff was equipped, false otherwise
-     */
+    /** Equip the best staff we already have, withdrawing it from the bank if needed. */
     public static boolean equipBestAvailableStaff(int[] requiredRunes) {
-        // check if we already have a good staff equipped
-        Rs2Staff currentStaff = getEquippedStaff();
-        if (currentStaff != null && calculateStaffScore(currentStaff, requiredRunes) > 0) {
-            log.info("Already have suitable staff equipped: {}", currentStaff.name());
+        Rs2Staff current = getEquippedStaff();
+        if (current != null && calculateStaffScore(current, requiredRunes) > 0) {
+            log.info("Already have suitable staff equipped: {}", current.name());
             return true;
         }
-        
-        Rs2Staff bestStaff = findBestAvailableStaff(requiredRunes);
-        if (bestStaff == null) {
+
+        Rs2Staff best = findBestAvailableStaff(requiredRunes);
+        if (best == null) {
             log.info("No suitable staff found in inventory or bank");
             return false;
         }
-        
-        // try to equip from inventory first
-        if (Rs2Inventory.hasItem(bestStaff.getItemID())) {
-            log.info("Equipping {} from inventory", bestStaff.name());
-            return Rs2Inventory.wield(bestStaff.getItemID());
+
+        if (Rs2Inventory.hasItem(best.getItemID())) {
+            log.info("Equipping {} from inventory", best.name());
+            return Rs2Inventory.wield(best.getItemID());
         }
-        
-        // if bank is open, try to withdraw and equip from bank
-        if (Rs2Bank.isOpen() && Rs2Bank.hasItem(bestStaff.getItemID())) {
-            log.info("Withdrawing and equipping {} from bank", bestStaff.name());
-            return Rs2Bank.withdrawAndEquip(bestStaff.getItemID());
+        if (Rs2Bank.isOpen() && Rs2Bank.hasItem(best.getItemID())) {
+            log.info("Withdrawing and equipping {} from bank", best.name());
+            return Rs2Bank.withdrawAndEquip(best.getItemID());
         }
-        
         return false;
     }
 }

@@ -1,18 +1,24 @@
 package net.runelite.client.plugins.microbot.autobankstander.skills.magic.enchanting;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 import net.runelite.api.Skill;
 import net.runelite.api.gameval.ItemID;
-import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.autobankstander.processors.BankStandingProcessor;
-import net.runelite.client.plugins.microbot.util.magic.Rs2Staff;
 import net.runelite.client.plugins.microbot.globval.enums.InterfaceTab;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
+import net.runelite.client.plugins.microbot.util.dialogues.Rs2Dialogue;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
+import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
+import net.runelite.client.plugins.microbot.util.magic.Rs2Staff;
+import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.player.Rs2Player;
 import net.runelite.client.plugins.microbot.util.tabs.Rs2Tab;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
@@ -23,290 +29,453 @@ import static net.runelite.client.plugins.microbot.util.Global.sleepUntil;
 
 @Slf4j
 public class EnchantingProcessor implements BankStandingProcessor {
-    
-    private BoltType selectedBoltType;
-    
+
+    private static final long PROGRESS_GRACE_MS = 4000;
+    private static final long STARTUP_GRACE_MS = 1500;
+
+    private final BoltType selectedBoltType;
+
+    // Make All batch state
+    private boolean currentlyMaking;
+    private int[] trackedMaterials;
+    private int[] trackedRequirements;
+    private int[] materialCountsAtStart;
+    private Map<Integer, Integer> inventoryAtStart = new HashMap<>();
+    private long processingStartTime;
+    private long lastProgressTime;
+
     public EnchantingProcessor(BoltType boltType) {
         this.selectedBoltType = boltType;
     }
-    
+
     @Override
     public boolean validate() {
         if (selectedBoltType == null) {
             log.info("No bolt type selected");
             return false;
         }
-        
-        int currentLevel = Rs2Player.getRealSkillLevel(Skill.MAGIC);
-        int requiredLevel = selectedBoltType.getLevelRequired();
-        log.info("Magic level: {} (required: {})", currentLevel, requiredLevel);
-        
-        if (currentLevel < requiredLevel) {
-            log.info("Insufficient magic level for {}", selectedBoltType.getName());
+
+        int level = Rs2Player.getRealSkillLevel(Skill.MAGIC);
+        if (level < selectedBoltType.getLevelRequired()) {
+            log.info("Insufficient magic level for {}: need {}, have {}",
+                    selectedBoltType.getName(), selectedBoltType.getLevelRequired(), level);
             return false;
         }
-        
-        log.info("Selected bolt type: {}", selectedBoltType.getName());
         return true;
     }
-    
+
     @Override
     public List<String> getBankingRequirements() {
         List<String> requirements = new ArrayList<>();
         requirements.add(selectedBoltType.getName());
-        
-        // add rune requirements based on equipped staff
+
         Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
-        int[] runeIds = selectedBoltType.getRuneIds();
-        
-        for (int runeId : runeIds) {
+        for (int runeId : selectedBoltType.getRuneIds()) {
             if (!providedRunes.contains(runeId)) {
                 requirements.add(getRuneName(runeId));
             }
         }
-        
         return requirements;
     }
-    
+
     @Override
     public boolean hasRequiredItems() {
-        return hasRequiredRunes() && Rs2Inventory.hasItem(selectedBoltType.getUnenchantedId());
+        return Rs2Inventory.itemQuantity(selectedBoltType.getUnenchantedId()) >= 1 && hasRequiredRunes(1);
     }
-    
+
+    @Override
+    public boolean isActivelyProcessing() {
+        if (!currentlyMaking) {
+            return false;
+        }
+        if (Rs2Dialogue.isInDialogue() || Rs2Player.isAnimating(1000)) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        if (now - processingStartTime < STARTUP_GRACE_MS) {
+            return true;
+        }
+        return now - lastProgressTime < PROGRESS_GRACE_MS;
+    }
+
     @Override
     public boolean performBanking() {
         if (!Rs2Bank.isOpen()) {
             log.info("Bank not open");
             return false;
         }
-        
-        // check for missing items
+
+        if (Rs2Bank.hasWithdrawAsNote() && !Rs2Bank.setWithdrawAsItem()) {
+            log.info("Could not switch bank withdrawal mode to items");
+            return false;
+        }
+
+        // Equip before the missing-items check so staff-provided runes count as available.
+        if (StaffUtils.equipBestAvailableStaff(selectedBoltType.getRuneIds())) {
+            Rs2Random.waitEx(140, 70);
+            boolean equipped = sleepUntil(() -> StaffUtils.getEquippedStaff() != null, 3000);
+            log.info("Staff equip confirmation: {}", equipped);
+        }
+
         String missingItems = getMissingItemsList();
         if (!missingItems.isEmpty()) {
             log.info("Missing required items: {}", missingItems);
             return false;
         }
-        
-        // deposit everything first to start fresh
+
         if (!Rs2Inventory.isEmpty()) {
-            log.info("Depositing inventory items");
             Rs2Bank.depositAll();
-            boolean deposited = sleepUntil(() -> Rs2Inventory.isEmpty(), 3000);
-            if (!deposited) {
-                log.info("Failed to deposit items");
+            if (!sleepUntil(Rs2Inventory::isEmpty, 3000)) {
+                log.info("Failed to deposit inventory");
                 return false;
             }
         }
-        
-        // try to equip the best available staff for this bolt type
-        if (StaffUtils.equipBestAvailableStaff(selectedBoltType.getRuneIds())) {
-            log.info("Staff equipped successfully");
-            sleepUntil(() -> StaffUtils.getEquippedStaff() != null, 3000);
+
+        resetBatchTracking();
+
+        // Runes are stacks, so size the bolt batch to what the runes can actually cast.
+        int affordableBolts = maxBoltsAffordableFromBank();
+        int bankBolts = Rs2Bank.count(selectedBoltType.getUnenchantedId());
+        int amount = Math.min(bankBolts, affordableBolts);
+        amount = Math.min(amount, Rs2Inventory.emptySlotCount());
+        if (amount > 1) {
+            amount = Math.max(1, amount - Rs2Random.between(0, 1));
         }
-        
-        // withdraw required runes
-        if (!withdrawRequiredRunes()) {
-            log.info("Failed to withdraw required runes");
+        if (amount < 1) {
+            log.info("Not enough bolts/runes/free slots for an enchanting batch");
             return false;
         }
-        
-        // withdraw bolts
-        if (!withdrawBolts()) {
-            log.info("Failed to withdraw bolts");
+
+        if (!withdrawRequiredRunes(amount)) {
             return false;
         }
-        
-        log.info("Banking complete");
-        return true;
+        Rs2Random.waitEx(140, 70);
+        return withdrawBolts(amount);
     }
-    
+
     @Override
     public boolean process() {
-        log.info("Processing enchanting for {}", selectedBoltType.getName());
-        
-        // check if we have bolts to enchant
-        if (!Rs2Inventory.hasItem(selectedBoltType.getUnenchantedId())) {
-            log.info("No bolts in inventory to enchant");
+        if (currentlyMaking) {
+            if (tracksProgress()) {
+                return true;
+            }
+            log.info("Finished enchanting batch - preparing another one");
+            resetBatchTracking();
+        }
+
+        if (!hasRequiredItems()) {
             return false;
         }
-        
-        // check if we have required runes
-        if (!hasRequiredRunes()) {
-            log.info("Not enough runes");
-            return false;
-        }
-        
-        // open magic tab if not already open
+
         if (Rs2Tab.getCurrentTab() != InterfaceTab.MAGIC) {
-            log.info("Opening magic tab");
             Rs2Tab.switchTo(InterfaceTab.MAGIC);
-            sleepUntil(() -> Rs2Tab.getCurrentTab() == InterfaceTab.MAGIC, 2000);
-            return true; // return to let the main loop continue
-        }
-        
-        // cast the crossbow bolt enchant spell using sprite index
-        log.info("Casting Enchant Crossbow Bolt spell");
-        boolean success = castCrossbowBoltEnchantSpell();
-        if (success) {
-            // wait for the production widget to open
-            log.info("Waiting for production widget to open");
-            boolean widgetOpened = sleepUntil(() -> Rs2Widget.isProductionWidgetOpen(), 3000);
-            if (widgetOpened) {
-                log.info("Production widget opened, selecting bolt type: {}", selectedBoltType.getEnchantedName());
-                // select the correct bolt type from the production menu
-                boolean selected = Rs2Widget.clickWidget(selectedBoltType.getEnchantedName(), Optional.of(270), 13, false);
-                if (selected) {
-                    log.info("Successfully selected bolt type, waiting for enchanting to complete");
-                    sleepUntil(() -> Rs2Player.isAnimating(), 2000); // wait until we start the animation
-                    sleepUntil(() -> !Rs2Player.isAnimating(), 10000); // wait until the animation finishes
-                    return true;
-                } else {
-                    log.info("Failed to select bolt type from production menu");
-                    return false;
-                }
-            } else {
-                log.info("Production widget failed to open");
+            if (!sleepUntil(() -> Rs2Tab.getCurrentTab() == InterfaceTab.MAGIC, 2000)) {
                 return false;
             }
-        } else {
-            log.info("Failed to cast spell");
+            Rs2Random.waitEx(120, 60);
+            return true;
+        }
+
+        if (!castCrossbowBoltEnchantSpell()) {
+            log.info("Failed to cast Enchant Crossbow Bolt");
             return false;
         }
+        if (!sleepUntil(Rs2Widget::isProductionWidgetOpen, 3000)) {
+            log.info("Production widget did not open");
+            return false;
+        }
+
+        Rs2Random.waitEx(140, 70);
+        if (!selectBoltType()) {
+            log.info("Failed to select {} from the enchanting interface", selectedBoltType.getEnchantedName());
+            return false;
+        }
+
+        sleepUntil(() -> Rs2Player.isAnimating(1000), 2000);
+        sleepUntil(() -> !Rs2Player.isAnimating(1000), 10000);
+        startBatchTracking();
+        Rs2Random.waitEx(160, 80);
+        return true;
     }
-    
+
     @Override
     public boolean canContinueProcessing() {
-        // check if we have bolts to enchant in inventory
-        if (Rs2Inventory.hasItem(selectedBoltType.getUnenchantedId()) && hasRequiredRunes()) {
+        if (isActivelyProcessing()) {
             return true;
         }
-        
-        // check if there are bolts available in the bank
-        if (Rs2Bank.isNearBank(10) && Rs2Bank.hasItem(selectedBoltType.getUnenchantedId())) {
+        if (Rs2Inventory.itemQuantity(selectedBoltType.getUnenchantedId()) >= 1 && hasRequiredRunes(1)) {
             return true;
         }
-        
-        log.info("No more bolts to enchant in inventory or bank");
+        if (Rs2Bank.isNearBank(10) &&
+                Rs2Bank.count(selectedBoltType.getUnenchantedId()) > 0 &&
+                maxBoltsAffordableFromBank() > 0) {
+            return true;
+        }
+        log.info("No more bolts or runes to enchant with");
         return false;
     }
-    
+
     @Override
     public String getStatusMessage() {
+        if (currentlyMaking) {
+            return "Enchanting " + selectedBoltType.getName().toLowerCase() + "...";
+        }
         return "Enchanting " + selectedBoltType.getName() + "...";
     }
-    
-    private boolean hasRequiredRunes() {
+
+    // ---------------------------------------------------------------------
+    // Banking helpers
+    // ---------------------------------------------------------------------
+
+    /** Largest bolt batch the runes in the bank can fully enchant. */
+    private int maxBoltsAffordableFromBank() {
+        Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
         int[] runeIds = selectedBoltType.getRuneIds();
         int[] runeQuantities = selectedBoltType.getRuneQuantities();
-        
-        if (!Rs2Inventory.hasItem(selectedBoltType.getUnenchantedId())) {
-            log.info("No bolts in inventory to enchant");
-            return false;
+
+        int limit = Integer.MAX_VALUE;
+        for (int i = 0; i < runeIds.length; i++) {
+            if (providedRunes.contains(runeIds[i])) {
+                continue;
+            }
+            int perCast = Math.max(1, runeQuantities[i]);
+            limit = Math.min(limit, Rs2Bank.count(runeIds[i]) / perCast);
         }
-        
-        Rs2Staff equippedStaff = StaffUtils.getEquippedStaff();
+        return limit == Integer.MAX_VALUE ? Rs2Bank.count(selectedBoltType.getUnenchantedId()) : limit;
+    }
+
+    private boolean withdrawRequiredRunes(int boltCount) {
         Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
-        log.info("Checking runes with equipped staff: {}, provided runes: {}", 
-                equippedStaff != null ? equippedStaff.name() : "none", providedRunes);
-        
+        int[] runeIds = selectedBoltType.getRuneIds();
+        int[] runeQuantities = selectedBoltType.getRuneQuantities();
+
         for (int i = 0; i < runeIds.length; i++) {
             int runeId = runeIds[i];
-            int runesNeededPerCast = runeQuantities[i];
-            
-            // check if this rune is provided by equipped staff
             if (providedRunes.contains(runeId)) {
-                log.info("Rune {} provided by equipped staff", getRuneName(runeId));
+                log.info("Skipping {} withdrawal - provided by staff", getRuneName(runeId));
                 continue;
             }
-            
-            int available = Rs2Inventory.itemQuantity(runeId);
-            if (available < runesNeededPerCast) {
-                String runeName = getRuneName(runeId);
-                log.info("Missing rune: {} (have: {}, need: {} per cast)", runeName, available, runesNeededPerCast);
+
+            int needed = runeQuantities[i] * boltCount;
+            int bankQty = Rs2Bank.count(runeId);
+            if (bankQty < needed) {
+                log.info("Not enough {} for a batch of {} bolts (have {}, need {})",
+                        getRuneName(runeId), boltCount, bankQty, needed);
+                return false;
+            }
+
+            if (!withdraw(runeId, bankQty, true)) {
+                return false;
+            }
+            if (Rs2Inventory.itemQuantity(runeId) < needed) {
+                log.info("Withdrawal verification failed for {}", getRuneName(runeId));
                 return false;
             }
         }
         return true;
     }
-    
-    private boolean withdrawRequiredRunes() {
-        int[] runeIds = selectedBoltType.getRuneIds();
-        
-        // debug logging for staff detection
-        Rs2Staff equippedStaff = StaffUtils.getEquippedStaff();
-        if (equippedStaff != null) {
-            log.info("Detected equipped staff: {}", equippedStaff.name());
-            log.info("Staff provides runes: {}", equippedStaff.getRunes());
+
+    private boolean withdrawBolts(int amount) {
+        if (!withdraw(selectedBoltType.getUnenchantedId(), amount, false)) {
+            return false;
+        }
+        log.info("Withdrew {} bolts for enchanting", amount);
+        return true;
+    }
+
+    private boolean withdraw(int itemId, int amount, boolean stackable) {
+        if (amount <= 0) {
+            return false;
+        }
+
+        int before = Rs2Inventory.itemQuantity(itemId);
+        int bankQty = Rs2Bank.count(itemId);
+        int expectedGain = stackable ? bankQty : amount;
+        if (expectedGain <= 0) {
+            return false;
+        }
+
+        boolean requested;
+        if (stackable && amount > 1) {
+            requested = Rs2Bank.withdrawAll(itemId);
+        } else if (amount == 1) {
+            requested = Rs2Bank.withdrawOne(itemId);
         } else {
-            log.info("No equipped staff detected");
+            requested = Rs2Bank.withdrawX(itemId, amount);
         }
-        
-        Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
-        log.info("Total provided runes: {}", providedRunes);
-        
-        for (int runeId : runeIds) {
-            // skip runes that are provided by equipped staff
-            if (providedRunes.contains(runeId)) {
-                log.info("Skipping {} withdrawal - provided by equipped staff", getRuneName(runeId));
-                continue;
-            }
-            
-            if (!Rs2Inventory.hasItem(runeId)) {
-                if (!Rs2Bank.hasItem(runeId)) {
-                    log.info("Bank missing rune: {}", getRuneName(runeId));
-                    return false;
-                }
-                log.info("Withdrawing all {} from bank", getRuneName(runeId));
-                Rs2Bank.withdrawAll(runeId);
-                boolean withdrawn = sleepUntil(() -> Rs2Inventory.hasItem(runeId), 3000);
-                if (!withdrawn) {
-                    log.info("Failed to withdraw rune: {}", getRuneName(runeId));
-                    return false;
-                }
-                log.info("Successfully withdrew {} (total now: {})", getRuneName(runeId), Rs2Inventory.itemQuantity(runeId));
-            }
-        }
-        return true;
-    }
-    
-    private boolean withdrawBolts() {
-        if (Rs2Inventory.hasItem(selectedBoltType.getUnenchantedId())) {
-            return true;
-        }
-        
-        if (!Rs2Bank.hasItem(selectedBoltType.getUnenchantedId())) {
-            log.info("Bank missing bolts: {}", selectedBoltType.getName());
+
+        if (!requested) {
+            log.info("Bank rejected withdrawal of item {} (amount {})", itemId, amount);
             return false;
         }
-        
-        log.info("Withdrawing all bolts: {}", selectedBoltType.getName());
-        Rs2Bank.withdrawAll(selectedBoltType.getUnenchantedId());
-        boolean withdrawn = sleepUntil(() -> Rs2Inventory.hasItem(selectedBoltType.getUnenchantedId()), 3000);
-        if (!withdrawn) {
-            log.info("Failed to withdraw bolts");
-            return false;
-        }
-        return true;
+        return sleepUntil(() -> Rs2Inventory.itemQuantity(itemId) >= before + expectedGain, 3500);
     }
-    
+
+    // ---------------------------------------------------------------------
+    // Casting and batch tracking
+    // ---------------------------------------------------------------------
+
     private boolean castCrossbowBoltEnchantSpell() {
-        // cast the crossbow bolt enchant spell using the specific widget ID 218.10
         try {
-            log.info("Clicking Crossbow Bolt Enchantments spell at widget 218.10");
-            boolean success = Rs2Widget.clickWidget(218, 10);
-            if (success) {
-                log.info("Successfully clicked Crossbow Bolt Enchantments spell");
+            if (Rs2Magic.cast(BoltType.getCrossbowBoltSpell())) {
                 return true;
-            } else {
-                log.info("Failed to click Crossbow Bolt Enchantments spell widget");
-                return false;
             }
         } catch (Exception e) {
-            log.info("Error casting crossbow bolt enchant spell: {}", e.getMessage());
+            log.debug("Rs2Magic cast failed: {}", e.getMessage());
+        }
+
+        // Legacy widget fallback for clients where the spell lookup is not available.
+        Rs2Random.waitEx(120, 60);
+        return Rs2Widget.clickWidget(218, 10);
+    }
+
+    private boolean selectBoltType() {
+        String name = selectedBoltType.getEnchantedName();
+
+        if (Rs2Dialogue.hasCombinationDialogue() && Rs2Dialogue.getCombinationOption(name) != null) {
+            return Rs2Dialogue.clickCombinationOption(name);
+        }
+        if (Rs2Widget.clickWidget(name)) {
+            return true;
+        }
+        // Last-resort fallback to the old production widget child.
+        return Rs2Widget.clickWidget(name, Optional.of(270), 13, false);
+    }
+
+    private void startBatchTracking() {
+        List<Integer> materials = new ArrayList<>();
+        List<Integer> requirements = new ArrayList<>();
+        materials.add(selectedBoltType.getUnenchantedId());
+        requirements.add(1);
+
+        Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
+        int[] runeIds = selectedBoltType.getRuneIds();
+        int[] runeQuantities = selectedBoltType.getRuneQuantities();
+        for (int i = 0; i < runeIds.length; i++) {
+            if (!providedRunes.contains(runeIds[i])) {
+                materials.add(runeIds[i]);
+                requirements.add(Math.max(1, runeQuantities[i]));
+            }
+        }
+
+        currentlyMaking = true;
+        trackedMaterials = materials.stream().mapToInt(Integer::intValue).toArray();
+        trackedRequirements = requirements.stream().mapToInt(Integer::intValue).toArray();
+        materialCountsAtStart = Arrays.stream(trackedMaterials).mapToObj(Rs2Inventory::itemQuantity)
+                .mapToInt(Integer::intValue).toArray();
+        inventoryAtStart = inventorySnapshot();
+        processingStartTime = System.currentTimeMillis();
+        lastProgressTime = processingStartTime;
+        log.info("Started enchanting batch tracking for {}", selectedBoltType.getName());
+    }
+
+    private void resetBatchTracking() {
+        currentlyMaking = false;
+        trackedMaterials = null;
+        trackedRequirements = null;
+        materialCountsAtStart = null;
+        inventoryAtStart = new HashMap<>();
+        processingStartTime = 0;
+        lastProgressTime = 0;
+    }
+
+    private boolean tracksProgress() {
+        if (trackedMaterials == null) {
             return false;
         }
+
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < trackedMaterials.length; i++) {
+            if (Rs2Inventory.itemQuantity(trackedMaterials[i]) < materialCountsAtStart[i]) {
+                lastProgressTime = now;
+                break;
+            }
+        }
+
+        Map<Integer, Integer> current = inventorySnapshot();
+        for (Map.Entry<Integer, Integer> entry : current.entrySet()) {
+            Integer before = inventoryAtStart.get(entry.getKey());
+            if (before == null || entry.getValue() > before) {
+                lastProgressTime = now;
+                break;
+            }
+        }
+
+        for (int i = 0; i < trackedMaterials.length; i++) {
+            if (Rs2Inventory.itemQuantity(trackedMaterials[i]) < trackedRequirements[i]) {
+                return false;
+            }
+        }
+        return now - lastProgressTime < PROGRESS_GRACE_MS;
     }
-    
+
+    private Map<Integer, Integer> inventorySnapshot() {
+        Map<Integer, Integer> snapshot = new HashMap<>();
+        Rs2Inventory.items().forEach(item -> {
+            if (item.getId() > 0) {
+                snapshot.merge(item.getId(), item.getQuantity(), Integer::sum);
+            }
+        });
+        return snapshot;
+    }
+
+    // ---------------------------------------------------------------------
+    // Runes
+    // ---------------------------------------------------------------------
+
+    private boolean hasRequiredRunes(int casts) {
+        if (selectedBoltType == null || casts < 1) {
+            return false;
+        }
+        if (Rs2Inventory.itemQuantity(selectedBoltType.getUnenchantedId()) < 1) {
+            return false;
+        }
+
+        Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
+        int[] runeIds = selectedBoltType.getRuneIds();
+        int[] runeQuantities = selectedBoltType.getRuneQuantities();
+        for (int i = 0; i < runeIds.length; i++) {
+            if (providedRunes.contains(runeIds[i])) {
+                continue;
+            }
+            int needed = runeQuantities[i] * casts;
+            int available = Rs2Inventory.itemQuantity(runeIds[i]);
+            if (available < needed) {
+                log.info("Missing rune: {} (have {}, need {} for {} casts)",
+                        getRuneName(runeIds[i]), available, needed, casts);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String getMissingItemsList() {
+        StringBuilder missing = new StringBuilder();
+
+        int bolts = Rs2Inventory.itemQuantity(selectedBoltType.getUnenchantedId()) +
+                Rs2Bank.count(selectedBoltType.getUnenchantedId());
+        if (bolts < 1) {
+            missing.append(selectedBoltType.getName());
+        }
+
+        Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
+        int[] runeIds = selectedBoltType.getRuneIds();
+        int[] runeQuantities = selectedBoltType.getRuneQuantities();
+        for (int i = 0; i < runeIds.length; i++) {
+            if (providedRunes.contains(runeIds[i])) {
+                continue;
+            }
+            int total = Rs2Inventory.itemQuantity(runeIds[i]) + Rs2Bank.count(runeIds[i]);
+            if (total < runeQuantities[i]) {
+                if (missing.length() > 0) {
+                    missing.append(" - ");
+                }
+                missing.append(getRuneName(runeIds[i]));
+            }
+        }
+        return missing.toString();
+    }
+
     private String getRuneName(int runeId) {
         switch (runeId) {
             case ItemID.AIRRUNE: return "Air rune";
@@ -322,34 +491,5 @@ public class EnchantingProcessor implements BankStandingProcessor {
             case ItemID.DEATHRUNE: return "Death rune";
             default: return "Unknown rune (" + runeId + ")";
         }
-    }
-    
-    private String getMissingItemsList() {
-        StringBuilder missingItems = new StringBuilder();
-        
-        // check for missing bolts
-        if (!Rs2Bank.hasItem(selectedBoltType.getUnenchantedId()) && !Rs2Inventory.hasItem(selectedBoltType.getUnenchantedId())) {
-            missingItems.append(selectedBoltType.getName());
-        }
-        
-        // check for missing runes
-        int[] runeIds = selectedBoltType.getRuneIds();
-        Set<Integer> providedRunes = StaffUtils.getProvidedRunes();
-        
-        for (int runeId : runeIds) {
-            // skip runes provided by equipped staff
-            if (providedRunes.contains(runeId)) {
-                continue;
-            }
-            
-            if (!Rs2Bank.hasItem(runeId) && !Rs2Inventory.hasItem(runeId)) {
-                if (missingItems.length() > 0) {
-                    missingItems.append(" - ");
-                }
-                missingItems.append(getRuneName(runeId));
-            }
-        }
-        
-        return missingItems.toString();
     }
 }
